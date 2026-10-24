@@ -146,32 +146,72 @@ export function tagChips(tags = [], { max = 0 } = {}) {
   return list.map((tag) => `<span class="tag"><span class="dot" style="background:${esc(tag.color || '#fa9d3b')}"></span>${esc(tag.name)}</span>`).join('') + more;
 }
 
-/** 独立标签筛选条（独占一行、水平排列，不与其它工具元素混排） */
+/** 按标签组归并标签，保持后端返回顺序 */
+function groupTags(tags = []) {
+  const groups = new Map();
+  for (const tag of tags) {
+    const key = tag.groupId || tag.group_id || 0;
+    if (!groups.has(key)) {
+      groups.set(key, {
+        id: Number(key),
+        name: tag.groupName || tag.group_name || '未分组',
+        color: tag.groupColor || tag.group_color || '#8c8c99',
+        mode: (tag.groupSelectionMode || tag.group_selection_mode) === 'single' ? 'single' : 'multiple',
+        tags: [],
+      });
+    }
+    groups.get(key).tags.push(tag);
+  }
+  return [...groups.values()];
+}
+
+/** 独立标签筛选条（独占一行、水平排列，按标签组分组；单选组内互斥） */
 export function tagBarHtml(tags = [], selectedIds = [], { label = '标签' } = {}) {
   const selected = new Set((selectedIds || []).map(Number));
+  const groups = groupTags(tags);
   return `
     <div class="tag-bar">
       <div class="tag-bar-label">${esc(label)}</div>
       <div class="tag-bar-scroll">
-        ${tags.length
-          ? tags.map((tag) => `
-            <span class="tag selectable ${selected.has(Number(tag.id)) ? 'on' : ''}" data-ftag="${Number(tag.id)}">
-              <span class="dot" style="background:${esc(tag.color || '#fa9d3b')}"></span>${esc(tag.name)}
-            </span>`).join('')
+        ${groups.length
+          ? groups.map((group) => `
+            <span class="tag-group-sep" title="${esc(group.mode === 'single' ? '单选组：组内只能选择一个标签' : '多选组')}">
+              <span class="dot" style="background:${esc(group.color)}"></span>${esc(group.name)}${group.mode === 'single' ? '<span class="tag-group-mode">单选</span>' : ''}
+            </span>
+            ${group.tags.map((tag) => `
+              <span class="tag selectable ${selected.has(Number(tag.id)) ? 'on' : ''}" data-ftag="${Number(tag.id)}" data-fgroup="${group.id}" data-fmode="${group.mode}">
+                <span class="dot" style="background:${esc(tag.color || '#fa9d3b')}"></span>${esc(tag.name)}
+              </span>`).join('')}
+          `).join('')
           : '<span class="small muted-2">暂无标签，可在「标签管理」中创建</span>'}
       </div>
       ${selected.size ? '<button class="btn small ghost" data-ftag-clear>清除筛选</button>' : ''}
     </div>`;
 }
 
-/** 绑定标签筛选条事件；onChange 收到当前选中的标签 id 数组 */
+/** 绑定标签筛选条事件；单选标签组内互斥，onChange 收到当前选中的标签 id 数组 */
 export function bindTagBar(root, tags, selectedIds, onChange) {
   const selected = new Set((selectedIds || []).map(Number));
+  const meta = new Map((tags || []).map((tag) => [Number(tag.id), {
+    groupId: Number(tag.groupId || tag.group_id || 0),
+    mode: (tag.groupSelectionMode || tag.group_selection_mode) === 'single' ? 'single' : 'multiple',
+  }]));
   root.querySelectorAll('.tag-bar [data-ftag]').forEach((el) => {
     el.addEventListener('click', () => {
       const id = Number(el.dataset.ftag);
-      if (selected.has(id)) selected.delete(id);
-      else selected.add(id);
+      if (selected.has(id)) {
+        selected.delete(id);
+      } else {
+        const info = meta.get(id);
+        if (info?.mode === 'single') {
+          // 单选组：清除同组其他已选标签
+          for (const otherId of [...selected]) {
+            const other = meta.get(otherId);
+            if (other?.groupId === info.groupId) selected.delete(otherId);
+          }
+        }
+        selected.add(id);
+      }
       onChange?.([...selected]);
     });
   });
@@ -181,25 +221,55 @@ export function bindTagBar(root, tags, selectedIds, onChange) {
   });
 }
 
-/** 标签多选组件：渲染到容器，返回 { getSelected, setSelected } */
+/**
+ * 标签多选组件：按标签组渲染，单选组内只能选择一个标签。
+ * 返回 { getSelected, setSelected }
+ */
 export function chipSelector(container, allTags, selectedIds = [], onChange = null) {
   const selected = new Set((selectedIds || []).map(Number));
+  const meta = new Map((allTags || []).map((tag) => [Number(tag.id), {
+    groupId: Number(tag.groupId || tag.group_id || 0),
+    mode: (tag.groupSelectionMode || tag.group_selection_mode) === 'single' ? 'single' : 'multiple',
+  }]));
+  const groups = groupTags(allTags);
   function render() {
     if (!allTags.length) {
-      container.innerHTML = '<div class="empty-hint">暂无标签，可在「项目设置 → 标签」中创建</div>';
+      container.innerHTML = '<div class="empty-hint">暂无标签，可在「标签管理」中创建</div>';
       return;
     }
-    container.innerHTML = allTags.map((tag) => `
-      <span class="tag selectable ${selected.has(Number(tag.id)) ? 'on' : ''}" data-tag="${Number(tag.id)}">
-        <span class="dot" style="background:${esc(tag.color || '#fa9d3b')}"></span>${esc(tag.name)}
-      </span>`).join('');
+    container.innerHTML = `
+      <div class="chip-groups">
+        ${groups.map((group) => `
+          <div class="chip-group">
+            <div class="chip-group-head">
+              <span class="dot" style="background:${esc(group.color)}"></span>${esc(group.name)}
+              ${group.mode === 'single' ? '<span class="tag-group-mode">单选</span>' : ''}
+            </div>
+            <div class="chip-group-tags">
+              ${group.tags.map((tag) => `
+                <span class="tag selectable ${selected.has(Number(tag.id)) ? 'on' : ''}" data-tag="${Number(tag.id)}">
+                  <span class="dot" style="background:${esc(tag.color || '#fa9d3b')}"></span>${esc(tag.name)}
+                </span>`).join('')}
+            </div>
+          </div>`).join('')}
+      </div>`;
   }
   container.addEventListener('click', (event) => {
     const chip = event.target.closest('[data-tag]');
     if (!chip) return;
     const id = Number(chip.dataset.tag);
-    if (selected.has(id)) selected.delete(id);
-    else selected.add(id);
+    if (selected.has(id)) {
+      selected.delete(id);
+    } else {
+      const info = meta.get(id);
+      if (info?.mode === 'single') {
+        for (const otherId of [...selected]) {
+          const other = meta.get(otherId);
+          if (other?.groupId === info.groupId) selected.delete(otherId);
+        }
+      }
+      selected.add(id);
+    }
     render();
     onChange?.([...selected]);
   });
@@ -208,7 +278,15 @@ export function chipSelector(container, allTags, selectedIds = [], onChange = nu
     getSelected: () => [...selected],
     setSelected: (ids) => {
       selected.clear();
-      (ids || []).forEach((id) => selected.add(Number(id)));
+      const next = [];
+      (ids || []).map(Number).forEach((id) => {
+        const info = meta.get(id);
+        if (info?.mode === 'single') {
+          if (next.some((otherId) => meta.get(otherId)?.groupId === info.groupId)) return;
+        }
+        next.push(id);
+        selected.add(id);
+      });
       render();
     },
   };

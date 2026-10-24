@@ -73,6 +73,12 @@ export function createApiRouter(ctx) {
   router.put('/tags/:id', wrap(async (req) => tags.update(toInt(req.params.id), req.body || {})));
   router.delete('/tags/:id', wrap(async (req) => tags.remove(toInt(req.params.id))));
 
+  // ---------- 标签组 ----------
+  router.get('/tag-groups', wrap(async (req) => tags.groups.list({ withCounts: req.query.withCounts === '1' })));
+  router.post('/tag-groups', wrap(async (req) => tags.groups.create(req.body || {})));
+  router.put('/tag-groups/:id', wrap(async (req) => tags.groups.update(toInt(req.params.id), req.body || {})));
+  router.delete('/tag-groups/:id', wrap(async (req) => tags.groups.remove(toInt(req.params.id))));
+
   // ---------- 主体 ----------
   router.get('/subjects', wrap(async (req) => subjects.list({
     status: req.query.status || '',

@@ -16,13 +16,16 @@ export class BackupService {
       version: EXPORT_VERSION,
       exportedAt: nowIso(),
       settings: include.settings === false ? undefined : exportableSettings().settings,
-      tags: include.tags === false ? undefined : db().all('SELECT id, name, color, note FROM tags'),
+      tagGroups: include.tags === false ? undefined : db().all(
+        'SELECT id, name, color, note, selection_mode, sort_order FROM tag_groups ORDER BY sort_order, id',
+      ),
+      tags: include.tags === false ? undefined : db().all('SELECT id, name, color, note, group_id, created_at FROM tags'),
       subjects: include.subjects === false ? undefined : db().all(
         `SELECT id, name, note, avatar_url, wechat_id, wechat_nickname, finder_username, finder_nickname,
                 identity_key, status, last_login_at, created_at, updated_at FROM subjects`,
       ),
       subjectTags: include.subjects === false ? undefined : db().all('SELECT subject_id, tag_id FROM subject_tags'),
-      videoFolders: include.videos === false ? undefined : db().all('SELECT path, recursive, enabled FROM video_folders'),
+      videoFolders: include.videos === false ? undefined : db().all('SELECT path, recursive, enabled, tag_ids FROM video_folders'),
       videos: include.videos === false ? undefined : db().all('SELECT id, path, name, ext, size, md5, folder FROM videos'),
       videoTags: include.videos === false ? undefined : db().all('SELECT video_id, tag_id FROM video_tags'),
       texts: include.texts === false ? undefined : db().all('SELECT id, content, hash, note FROM texts'),
@@ -42,8 +45,9 @@ export class BackupService {
   async importAll(payload, { mode = 'merge' } = {}) {
     if (!payload || typeof payload !== 'object') throw new Error('导入文件格式不正确');
     if (payload.app && payload.app !== 'weixin-auto') throw new Error('不是本工具导出的配置文件');
-    const stats = { tags: 0, subjects: 0, videos: 0, texts: 0, publishConfigs: 0, folders: 0 };
+    const stats = { tagGroups: 0, tags: 0, subjects: 0, videos: 0, texts: 0, publishConfigs: 0, folders: 0 };
     const tagIdMap = new Map();
+    const groupIdMap = new Map();
 
     db().transaction(() => {
       if (mode === 'replace') {
@@ -52,23 +56,65 @@ export class BackupService {
         db().run('DELETE FROM video_tags');
         db().run('DELETE FROM text_tags');
         db().run('DELETE FROM tags');
+        db().run('DELETE FROM tag_groups');
+      }
+      // 标签组：按名称合并（旧备份没有标签组时归入「未分组」）
+      const existingGroups = new Map(db().all('SELECT id, name FROM tag_groups').map((row) => [row.name, Number(row.id)]));
+      for (const group of payload.tagGroups || []) {
+        const name = String(group.name || '').trim();
+        if (!name) continue;
+        let groupId = existingGroups.get(name);
+        if (!groupId) {
+          const now = nowIso();
+          const info = db().run(
+            'INSERT INTO tag_groups (name, color, note, selection_mode, sort_order, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+            name, group.color || '#6c5ce7', group.note || '', group.selection_mode === 'single' ? 'single' : 'multiple',
+            Number(group.sort_order || 0), now, now,
+          );
+          groupId = Number(info.lastInsertRowid);
+          existingGroups.set(name, groupId);
+          stats.tagGroups += 1;
+        }
+        groupIdMap.set(Number(group.id), groupId);
+      }
+      let fallbackGroupId = existingGroups.values().next().value || null;
+      if (!fallbackGroupId) {
+        const now = nowIso();
+        const info = db().run(
+          'INSERT INTO tag_groups (name, color, note, selection_mode, sort_order, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+          '未分组', '#8c8c99', '系统默认分组', 'multiple', 0, now, now,
+        );
+        fallbackGroupId = Number(info.lastInsertRowid);
+        existingGroups.set('未分组', fallbackGroupId);
       }
       // 标签：按名称合并
       for (const tag of payload.tags || []) {
+        const mappedGroupId = tag.group_id ? (groupIdMap.get(Number(tag.group_id)) || fallbackGroupId) : fallbackGroupId;
         let existing = db().get('SELECT id FROM tags WHERE name = ?', tag.name);
         if (!existing) {
-          const info = db().run('INSERT INTO tags (name, color, note, created_at) VALUES (?, ?, ?, ?)',
-            tag.name, tag.color || '#fa9d3b', tag.note || '', nowIso());
+          const info = db().run('INSERT INTO tags (name, color, note, group_id, created_at) VALUES (?, ?, ?, ?, ?)',
+            tag.name, tag.color || '#fa9d3b', tag.note || '', mappedGroupId, nowIso());
           existing = { id: Number(info.lastInsertRowid) };
           stats.tags += 1;
         }
         tagIdMap.set(Number(tag.id), Number(existing.id));
       }
+      const remapFolderTags = (raw) => {
+        let ids = [];
+        try { ids = JSON.parse(raw || '[]'); } catch { ids = []; }
+        if (!Array.isArray(ids)) return null;
+        const mapped = [...new Set(ids.map((id) => tagIdMap.get(Number(id))).filter(Boolean))];
+        return JSON.stringify(mapped);
+      };
       // 视频文件夹
       for (const folder of payload.videoFolders || []) {
         try {
-          db().run('INSERT OR IGNORE INTO video_folders (path, recursive, enabled, created_at) VALUES (?, ?, ?, ?)',
-            folder.path, folder.recursive ? 1 : 0, folder.enabled ? 1 : 0, nowIso());
+          const tagIds = folder.tag_ids !== undefined ? remapFolderTags(folder.tag_ids) : null;
+          db().run('INSERT OR IGNORE INTO video_folders (path, recursive, enabled, tag_ids, created_at) VALUES (?, ?, ?, ?, ?)',
+            folder.path, folder.recursive ? 1 : 0, folder.enabled ? 1 : 0, tagIds, nowIso());
+          if (tagIds && db().get('SELECT id FROM video_folders WHERE path = ?', folder.path)) {
+            db().run('UPDATE video_folders SET tag_ids = ? WHERE path = ?', tagIds, folder.path);
+          }
           stats.folders += 1;
         } catch { /* ignore */ }
       }

@@ -14,11 +14,23 @@ CREATE TABLE IF NOT EXISTS settings (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS tag_groups (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  name           TEXT NOT NULL UNIQUE,
+  color          TEXT NOT NULL DEFAULT '#6c5ce7',
+  note           TEXT,
+  selection_mode TEXT NOT NULL DEFAULT 'multiple',
+  sort_order     INTEGER NOT NULL DEFAULT 0,
+  created_at     TEXT NOT NULL,
+  updated_at     TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS tags (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   name       TEXT NOT NULL UNIQUE,
   color      TEXT NOT NULL DEFAULT '#fa9d3b',
   note       TEXT,
+  group_id   INTEGER,
   created_at TEXT NOT NULL
 );
 
@@ -210,6 +222,8 @@ export class Db {
     this.ensureColumn('videos', 'removed', 'INTEGER NOT NULL DEFAULT 0');
     this.ensureColumn('videos', 'removed_at', 'TEXT');
     this.ensureColumn('video_folders', 'tag_ids', 'TEXT');
+    this.ensureColumn('tags', 'group_id', 'INTEGER');
+    this.migrateTagGroups();
   }
 
   ensureColumn(table, column, type) {
@@ -219,6 +233,28 @@ export class Db {
         this.raw.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
       }
     } catch { /* 忽略迁移失败，保持旧库可用 */ }
+  }
+
+  /** 标签组迁移：保证每个具体标签都归属于一个标签组（旧数据归入「未分组」） */
+  migrateTagGroups() {
+    try {
+      const now = new Date().toISOString();
+      let groups = this.raw.prepare('SELECT id, name FROM tag_groups ORDER BY sort_order, id').all();
+      if (!groups.length) {
+        this.raw.prepare(
+          'INSERT INTO tag_groups (name, color, note, selection_mode, sort_order, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        ).run('未分组', '#8c8c99', '系统默认分组（旧标签迁移）', 'multiple', 0, now, now);
+        groups = this.raw.prepare('SELECT id, name FROM tag_groups ORDER BY sort_order, id').all();
+      }
+      const validIds = new Set(groups.map((group) => Number(group.id)));
+      const orphanTags = this.raw.prepare('SELECT id, group_id FROM tags').all()
+        .filter((tag) => !tag.group_id || !validIds.has(Number(tag.group_id)));
+      if (orphanTags.length) {
+        const fallback = Number(groups[0].id);
+        const update = this.raw.prepare('UPDATE tags SET group_id = ? WHERE id = ?');
+        for (const tag of orphanTags) update.run(fallback, tag.id);
+      }
+    } catch { /* 迁移失败时保持可用，标签组页面可手动整理 */ }
   }
 
   exec(sql) {

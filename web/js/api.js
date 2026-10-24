@@ -33,6 +33,10 @@ export const api = {
   assignTags: (body) => request('/tags/assign', { method: 'POST', body }),
   updateTag: (id, body) => request(`/tags/${id}`, { method: 'PUT', body }),
   deleteTag: (id) => request(`/tags/${id}`, { method: 'DELETE' }),
+  tagGroups: (withCounts = false) => request(`/tag-groups${withCounts ? '?withCounts=1' : ''}`),
+  createTagGroup: (body) => request('/tag-groups', { method: 'POST', body }),
+  updateTagGroup: (id, body) => request(`/tag-groups/${id}`, { method: 'PUT', body }),
+  deleteTagGroup: (id) => request(`/tag-groups/${id}`, { method: 'DELETE' }),
 
   // 主体
   subjects: (query = {}) => {

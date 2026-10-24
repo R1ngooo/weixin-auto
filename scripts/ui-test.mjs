@@ -177,17 +177,61 @@ async function main() {
     await waitFor(async () => (await page.locator('.item-card').count()) > 0, { timeout: 8000, label: '任务详情' });
     ok('任务详情展示明细');
 
-    step('标签管理：独立页面');
+    step('标签管理：标签组 + 标签列表');
     await go(page, '/tags');
-    await waitFor(async () => (await page.locator('table.table, .empty').count()) > 0, { timeout: 8000, label: '标签页' });
-    if (await page.locator('table.table tbody tr').count() >= 2) ok('标签列表渲染'); else fail('标签列表缺失');
-    // 新建一个标签
-    await page.locator('#topbar-right button:has-text("新建标签")').click();
+    await waitFor(async () => (await page.locator('.tag-group-list').count()) > 0, { timeout: 8000, label: '标签组区域' });
+    const groupRowCount = await page.locator('.tag-group-row').count();
+    if (groupRowCount >= 2) ok('标签组区域渲染（全部标签 + 系统默认分组）'); else fail(`标签组区域异常：${groupRowCount}`);
+    if (await page.locator('table.table tbody tr').count() >= 2) ok('标签列表默认显示全部标签'); else fail('标签列表缺失');
+    // 新增单选标签组
+    await page.locator('[data-act="add-group"]').click();
     await page.waitForSelector('.modal-overlay');
-    await page.locator('.modal-body [data-name]').fill('UI 测试标签');
+    await page.locator('.modal-body [data-name]').fill('UI 单选组');
+    await page.locator('.modal-body input[name="group-mode"][value="single"]').check();
     await page.locator('.modal-foot button:has-text("保存")').click();
-    await waitFor(async () => (await page.locator('table.table:has-text("UI 测试标签")').count()) > 0, { timeout: 8000, label: '新建标签' });
-    ok('标签新建成功');
+    await waitFor(async () => (await page.locator('.tag-group-row:has-text("UI 单选组")').count()) > 0, { timeout: 8000, label: '新建标签组' });
+    ok('新增单选标签组成功');
+    // 点击标签组 → 标签列表仅显示该组标签（此时为空）
+    await page.locator('.tag-group-row:has-text("UI 单选组")').click();
+    await sleep(500);
+    if (await page.locator('.empty').count() > 0) ok('点击标签组后按组筛选标签列表'); else fail('标签组筛选未生效');
+    // 在该组下新增两个标签
+    for (const name of ['UI 组内标签1', 'UI 组内标签2']) {
+      await page.locator('[data-act="add-tag"]').first().click();
+      await page.waitForSelector('.modal-overlay');
+      await page.locator('.modal-body [data-name]').fill(name);
+      await page.locator('.modal-foot button:has-text("保存")').click();
+      await waitFor(async () => (await page.locator(`table.table:has-text("${name}")`).count()) > 0, { timeout: 8000, label: `新增标签 ${name}` });
+    }
+    ok('标签组内新增两个标签');
+    // 切换单选/多选
+    const modeToggle = page.locator('.tag-group-row:has-text("UI 单选组") [data-mode-toggle]');
+    await modeToggle.click();
+    await sleep(700);
+    const modeText = await page.locator('.tag-group-row:has-text("UI 单选组") [data-mode-toggle]').innerText();
+    if (modeText.includes('多选')) ok('标签组单选/多选切换生效'); else fail(`模式切换异常：${modeText}`);
+    await page.locator('.tag-group-row:has-text("UI 单选组") [data-mode-toggle]').click();
+    await sleep(700);
+    // 回到全部标签
+    await page.locator('.tag-group-row:has-text("全部标签")').click();
+    await sleep(500);
+    if (await page.locator('table.table tbody tr').count() >= 4) ok('切回全部标签列表'); else fail('全部标签列表异常');
+
+    step('主体管理：单选标签组互斥选择');
+    await go(page, '/subjects');
+    await page.locator('.subject-card').first().locator('button:has-text("编辑")').click();
+    await page.waitForSelector('.modal-overlay');
+    await sleep(400);
+    const modalTags = page.locator('.modal-body [data-tags]');
+    if (await modalTags.locator('.chip-group').count() >= 2) ok('标签选择组件按标签组分组展示'); else fail('标签选择组件未按组展示');
+    await modalTags.locator('[data-tag]').filter({ hasText: 'UI 组内标签1' }).click();
+    await sleep(200);
+    await modalTags.locator('[data-tag]').filter({ hasText: 'UI 组内标签2' }).click();
+    await sleep(300);
+    const singleSelected = await modalTags.locator('.tag.on').count();
+    if (singleSelected === 1) ok('单选组内只能选中一个标签'); else fail(`单选组互斥失效，选中 ${singleSelected} 个`);
+    await page.locator('.modal-close').click();
+    await page.waitForTimeout(300);
 
     step('视频池：抖音竖卡 + 标签筛选条');
     await go(page, '/videos');

@@ -155,6 +155,29 @@ async function main() {
       return '3 个标签';
     });
 
+    await check('标签组 CRUD 与删除保护', async () => {
+      const defaultGroups = await api('/tag-groups?withCounts=1');
+      assert(defaultGroups.length >= 1, '应存在默认标签组');
+      const group = await api('/tag-groups', { method: 'POST', body: { name: '产品组-测试', selectionMode: 'single', color: '#7c6cf2' } });
+      assert(group.selectionMode === 'single', '标签组应为单选模式');
+      state.tagGroupId = group.id;
+      const tagA = await api('/tags', { method: 'POST', body: { name: '产品A-测试', groupId: group.id } });
+      const tagB = await api('/tags', { method: 'POST', body: { name: '产品B-测试', groupId: group.id } });
+      state.groupTagA = tagA.id;
+      state.groupTagB = tagB.id;
+      assert(tagA.groupId === group.id && tagA.groupName === '产品组-测试', '标签应归属指定标签组');
+      // 非空标签组不可删除
+      let blocked = false;
+      try { await api(`/tag-groups/${group.id}`, { method: 'DELETE' }); } catch (error) { blocked = /还有/.test(error.message); }
+      assert(blocked, '非空标签组删除应被拒绝');
+      // 空标签组可删除
+      const emptyGroup = await api('/tag-groups', { method: 'POST', body: { name: '空组-测试' } });
+      await api(`/tag-groups/${emptyGroup.id}`, { method: 'DELETE' });
+      const afterDelete = await api('/tag-groups');
+      assert(!afterDelete.some((item) => Number(item.id) === Number(emptyGroup.id)), '空标签组应可删除');
+      return `单选组 #${group.id}，标签 ${tagA.name} / ${tagB.name}`;
+    });
+
     await check('视频文件夹与扫描', async () => {
       const mediaDir = path.join(DATA_DIR, 'media');
       await fsp.mkdir(mediaDir, { recursive: true });
@@ -195,6 +218,29 @@ async function main() {
       const list = await api(`/videos?tagIds=${state.videoTag}&pageSize=50`);
       assert(list.total === 3, `按标签筛选应有 3 个视频，实际 ${list.total}`);
       return '按标签筛选通过';
+    });
+
+    await check('单选标签组约束与标签删除保护', async () => {
+      const video = state.videos[0];
+      let blocked = false;
+      try {
+        await api('/tags/assign', { method: 'POST', body: { kind: 'video', ids: [video.id], tagIds: [state.groupTagA, state.groupTagB], mode: 'set' } });
+      } catch (error) {
+        blocked = /单选模式/.test(error.message);
+      }
+      assert(blocked, '单选标签组同时关联两个标签应被拒绝');
+      await api('/tags/assign', { method: 'POST', body: { kind: 'video', ids: [video.id], tagIds: [state.groupTagA], mode: 'set' } });
+      let delBlocked = false;
+      try {
+        await api(`/tags/${state.groupTagA}`, { method: 'DELETE' });
+      } catch (error) {
+        delBlocked = /关联/.test(error.message);
+      }
+      assert(delBlocked, '有关联的标签删除应被拒绝');
+      // 恢复视频原标签，再删除无关联的临时标签
+      await api('/tags/assign', { method: 'POST', body: { kind: 'video', ids: [video.id], tagIds: [state.videoTag], mode: 'set' } });
+      await api(`/tags/${state.groupTagA}`, { method: 'DELETE' });
+      return '单选约束与删除保护通过';
     });
 
     await check('文件夹导入标签 + 搜索包含标签', async () => {
@@ -390,7 +436,8 @@ async function main() {
       const res = await fetch(`http://127.0.0.1:${PORT}/api/settings/export`);
       const payload = await res.json();
       assert(payload.app === 'weixin-auto', '导出内容应包含 app 标识');
-      assert(payload.tags?.length === 4, `导出应包含标签，实际 ${payload.tags?.length}`);
+      assert(payload.tags?.length === 5, `导出应包含标签，实际 ${payload.tags?.length}`);
+      assert(payload.tagGroups?.length >= 2, `导出应包含标签组，实际 ${payload.tagGroups?.length}`);
       assert(payload.videos?.length === 3, '导出应包含视频元数据');
       assert(payload.texts?.length === 3, '导出应包含文本');
       assert(payload.publishConfigs?.length >= 2, '导出应包含发布配置');
@@ -402,7 +449,12 @@ async function main() {
       const result = await api('/settings/import', { method: 'POST', body: { payload: state.export, mode: 'merge' } });
       const videos = await api('/videos?pageSize=50');
       assert(videos.total === 3, '重复导入视频不应产生重复记录');
-      return `新增 视频${result.stats.videos} 主体${result.stats.subjects} 文本${result.stats.texts}`;
+      const groups = await api('/tag-groups');
+      assert(groups.length >= 2, '导入后应保留标签组');
+      const groupTags = await api(`/tags?withCounts=1`);
+      const productTag = groupTags.find((tag) => tag.name === '产品B-测试');
+      assert(productTag && productTag.groupName === '产品组-测试', '导入后标签组归属应保留');
+      return `新增 视频${result.stats.videos} 主体${result.stats.subjects} 文本${result.stats.texts}，标签组 ${groups.length} 个`;
     });
 
     await check('软移除视频（保留数据库记录）', async () => {
