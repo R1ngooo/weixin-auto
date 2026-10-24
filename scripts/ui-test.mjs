@@ -108,6 +108,10 @@ async function main() {
     step('概览页加载');
     await go(page, '/dashboard');
     if (await page.locator('.stat-card').count() >= 4) ok('统计卡片渲染'); else fail('统计卡片缺失');
+    const navOrder = (await page.locator('#nav .nav-item span').allInnerTexts()).map((text) => text.trim());
+    const expectedNav = ['概览', '标签管理', '主体管理', '视频池', '文本池', '发布页面配置', '执行记录', '系统设置'];
+    if (JSON.stringify(navOrder) === JSON.stringify(expectedNav)) ok('左侧导航顺序与名称正确');
+    else fail(`导航顺序异常：${navOrder.join(' → ')}`);
 
     step('主体管理：扫码登录弹窗');
     await go(page, '/subjects');
@@ -353,9 +357,11 @@ async function main() {
     await page.waitForTimeout(300);
     if (await page.locator('.modal-overlay').count() === 0) ok('右上角 × 可关闭弹窗'); else fail('右上角 × 未关闭弹窗');
 
-    step('项目设置：单列瀑布 + 左侧子导航 + 演练测试环境');
+    step('系统设置：单列瀑布 + 左侧子导航 + 演练测试环境');
     await go(page, '/settings');
     await waitFor(async () => (await page.locator('.settings-layout').count()) > 0, { timeout: 8000, label: '设置页' });
+    const settingsTitle = await page.locator('#page-title').innerText();
+    if (settingsTitle.trim() === '系统设置') ok('页面标题为「系统设置」'); else fail(`设置页标题异常：${settingsTitle}`);
     const sectionCount = await page.locator('.settings-section').count();
     const navCount = await page.locator('.settings-nav-item').count();
     if (sectionCount === 7 && navCount === 7) ok('设置页为单列 7 个模块 + 左侧子导航');

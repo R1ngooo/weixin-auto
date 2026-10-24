@@ -40,8 +40,8 @@ export const dashboardPage = {
             <button class="btn" data-go="/texts">导入文本</button>
             <button class="btn" data-go="/configs" data-action="new">新建发布配置</button>
             <span class="spacer" style="flex:1"></span>
-            <button class="btn ghost" data-go="/tasks">查看执行记录</button>
             <button class="btn ghost" data-go="/tags">标签管理</button>
+            <button class="btn ghost" data-go="/tasks">查看执行记录</button>
           </div>
         </div>
 

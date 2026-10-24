@@ -8,7 +8,7 @@ function numberField(label, key, value, hint = '', step = '1', min = '0') {
   return `<label class="field"><span>${esc(label)}</span><input type="number" data-num="${esc(key)}" value="${esc(value)}" step="${step}" min="${min}">${hint ? `<span class="help-text">${esc(hint)}</span>` : ''}</label>`;
 }
 
-/** 项目设置：单列瀑布式布局 + 左侧子导航 + 演练测试环境开关 */
+/** 系统设置：单列瀑布式布局 + 左侧子导航 + 演练测试环境开关 */
 export const settingsPage = {
   async mount(ctx) {
     const data = await store.loadSettings(true);

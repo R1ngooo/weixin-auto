@@ -127,7 +127,7 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; }
 .card.soft { background: var(--bg-soft); box-shadow: none; }
 .folder-form { padding: 12px; }
 
-/* 项目设置：左侧子导航 + 单列瀑布 */
+/* 系统设置：左侧子导航 + 单列瀑布 */
 .settings-layout { display: flex; gap: 20px; align-items: flex-start; }
 .settings-nav {
   position: sticky; top: 8px; width: 172px; flex: none;
