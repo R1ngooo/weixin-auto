@@ -416,33 +416,6 @@ export function createPublisher({ browser, getSettings, getSelectors, subjects }
     return { ok: false, reason: `未找到合集「${name}」` };
   }
 
-  async function setOriginal(page, onProgress) {
-    const sel = getSelectors().publish;
-    onProgress?.({ step: 'original', message: '检查原创声明选项' });
-    for (const text of sel.originalCheckboxTexts) {
-      const label = page.getByText(text, { exact: false }).first();
-      if (await label.count().catch(() => 0) && await label.isVisible().catch(() => false)) {
-        await label.click({ timeout: 6000 }).catch(() => undefined);
-        await sleep(700);
-        // 首次勾选会弹出声明原创确认弹窗
-        for (const confirmText of sel.originalDialogConfirmTexts) {
-          const confirm = await findButton(page, [confirmText], { timeout: 1500 });
-          if (confirm) {
-            const checkbox = page.locator('.ant-modal .ant-checkbox-input, .common-dialog input[type="checkbox"]').first();
-            if (await checkbox.count().catch(() => 0)) {
-              await checkbox.check({ timeout: 3000 }).catch(() => undefined);
-            }
-            await confirm.click({ timeout: 5000 }).catch(() => undefined);
-            await sleep(800);
-            break;
-          }
-        }
-        return { ok: true };
-      }
-    }
-    return { ok: false, reason: '当前版本发表页已没有「声明原创」开关（改版为「视频标注」，可在配置里设置视频标注）' };
-  }
-
   /** 视频标注（新版替代「原创声明」位置，下拉单选） */
   async function setVideoMark(page, value, onProgress) {
     const sel = getSelectors().publish;
@@ -504,10 +477,10 @@ export function createPublisher({ browser, getSettings, getSelectors, subjects }
   }
 
   async function setExtLink(page, url, onProgress) {
-    if (!url) return { ok: false, reason: '未配置扩展链接' };
+    if (!url) return { ok: false, reason: '未配置链接' };
     const input = await firstVisible(page, getSelectors().publish.extLinkInputSelectors, { timeout: 3000 });
-    if (!input) return { ok: false, reason: '未找到扩展链接输入框' };
-    onProgress?.({ step: 'ext-link', message: `填写扩展链接：${truncate(url, 40)}` });
+    if (!input) return { ok: false, reason: '未找到链接输入框' };
+    onProgress?.({ step: 'ext-link', message: `填写链接：${truncate(url, 40)}` });
     await input.click().catch(() => undefined);
     await input.fill(url);
     await sleep(1500);
@@ -605,9 +578,9 @@ export function createPublisher({ browser, getSettings, getSelectors, subjects }
           notes.push(`描述长度 ${description.length}`);
         }
         if (options.shortTitle?.enabled) {
-          const value = options.shortTitle.value || (options.shortTitle.fromVideoName ? video.name.replace(/\.[^.]+$/, '') : '');
+          const value = options.shortTitle.value || '';
           const ok = await fillShortTitle(page, value, progress);
-          if (!ok) warnings.push('短标题填写失败（页面无输入框）');
+          if (!ok) warnings.push('短标题填写失败（页面无输入框或内容为空）');
         }
         if (options.location?.enabled) {
           const result = await setLocation(page, options.location.value, progress);
@@ -617,23 +590,19 @@ export function createPublisher({ browser, getSettings, getSelectors, subjects }
           const result = await setCollection(page, options.collection.value, progress);
           if (!result.ok) warnings.push(`合集设置失败：${result.reason}`);
         }
-        if (options.original?.enabled) {
-          const result = await setOriginal(page, progress);
-          if (!result.ok) warnings.push(`原创声明：${result.reason}`);
-        }
-        if (options.videoMark?.enabled) {
-          const result = await setVideoMark(page, options.videoMark.value, progress);
-          if (!result.ok) warnings.push(`视频标注设置失败：${result.reason}`);
-          else if (result.skipped) notes.push('视频标注：无需标注');
-        }
         if (options.extLink?.enabled) {
           const result = await setExtLink(page, options.extLink.value, progress);
-          if (!result.ok) warnings.push(`扩展链接设置失败：${result.reason}`);
+          if (!result.ok) warnings.push(`链接设置失败：${result.reason}`);
         }
         if (options.scheduled?.enabled) {
           const result = await setScheduled(page, options.scheduled, progress);
           if (!result.ok) warnings.push(`定时发表设置失败：${result.reason}`);
           else if (result.note) notes.push(result.note);
+        }
+        if (options.videoMark?.enabled) {
+          const result = await setVideoMark(page, options.videoMark.value, progress);
+          if (!result.ok) warnings.push(`视频标注设置失败：${result.reason}`);
+          else if (result.skipped) notes.push('视频标注：无需标注');
         }
 
         await delay(page, Number(timing().afterUploadSettleMs || 0));

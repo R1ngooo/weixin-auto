@@ -196,19 +196,56 @@ async function main() {
     await waitFor(async () => (await page.locator('td .text-preview:has-text("导入文本一")').count()) > 0, { timeout: 8000, label: '导入结果' });
     ok('导入文本成功');
 
-    step('发布配置：新建配置');
+    step('发布配置：新建配置（基本配置 + 资源标签 + 排版校验）');
     await go(page, '/configs');
     await page.locator('button:has-text("新建发布配置")').first().click();
     await page.waitForSelector('.modal-overlay .modal.xwide', { timeout: 5000 });
     ok('配置编辑器打开');
+    if (await page.locator('.modal-body [data-short-from-video]').count() === 0 && await page.locator('.modal-body [data-original-enabled]').count() === 0) {
+      ok('已移除「使用视频文件名」「声明原创（旧版选项）」');
+    } else {
+      fail('仍存在已废弃的短标题/原创选项');
+    }
+    const optionTexts = (await page.locator('.modal-body .page-option').allInnerTexts()).map((text) => text.replace(/\s+/g, ' ').trim());
+    const optionIndex = (keyword) => optionTexts.findIndex((text) => text.includes(keyword));
+    const ordered = ['视频描述', '短标题', '设置位置', '添加到合集', '链接', '定时发表', '视频标注'];
+    const indexes = ordered.map(optionIndex);
+    if (indexes.every((index, position) => index >= 0 && (position === 0 || index > indexes[position - 1]))) {
+      ok('发表选项按「描述→短标题→位置→合集→链接→定时→视频标注」自上而下排列');
+    } else {
+      fail(`发表选项顺序异常：${JSON.stringify(indexes)}`);
+    }
+    if (await page.locator('.modal-body label.check:has-text("链接")').count() === 1) ok('「扩展链接」已改名为「链接」'); else fail('缺少「链接」选项');
+    if (await page.locator('.modal-body input[name="schedule-mode"]').count() === 2) ok('定时发表为「不定时 / 定时」两个选项'); else fail('定时发表选项异常');
+    await page.locator('.modal-body input[name="schedule-mode"][value="on"]').check();
+    if (await page.locator('.modal-body [data-schedule-value]').isVisible()) ok('选择定时后才显示日期选择框'); else fail('日期选择框未按条件显示');
+    if ((await page.locator('.modal-body [data-schedule-value]').getAttribute('step')) === '60') ok('定时时间颗粒度为分钟'); else fail('定时时间颗粒度不是分钟');
+    await page.locator('.modal-body input[name="schedule-mode"][value="off"]').check();
     await page.locator('.modal-body [data-name]').fill('UI 测试配置');
+    // 资源标签统一筛选 + 指定主体
+    await page.locator('.modal-body [data-resource-tags] .tag:has-text("视频标签")').click();
+    await page.locator('.modal-body [data-resource-tags] .tag:has-text("文本标签")').click();
+    await page.locator('.modal-body input[name="subject-mode"][value="ids"]').check();
+    await waitFor(async () => (await page.locator('.modal-body [data-subject-check]').count()) > 0, { timeout: 5000, label: '指定主体列表' });
     await page.locator('.modal-body [data-subject-check]').first().check();
     await page.locator('.modal-body [data-desc-hashtags]').fill('测试话题,自动化');
-    await page.locator('.modal-body [data-video-tag-chips] .tag:has-text("视频标签")').click();
-    await page.locator('.modal-body [data-text-tag-chips] .tag:has-text("文本标签")').click();
+    // 短标题必填 + 6-16 字前端校验
+    await page.locator('.modal-body [data-short-enabled]').check();
+    await page.locator('.modal-foot button[data-save]').click();
+    await waitFor(async () => (await page.locator('.toast:has-text("短标题")').count()) > 0, { timeout: 5000, label: '短标题提示' });
+    ok('勾选短标题但为空时提示必填');
+    await page.locator('.modal-body [data-short-value]').fill('太短');
+    await page.locator('.modal-foot button[data-save]').click();
+    await waitFor(async () => (await page.locator('.toast:has-text("6-16")').count()) > 0, { timeout: 5000, label: '短标题长度提示' });
+    ok('短标题少于 6 字时提示长度限制');
+    await page.locator('.modal-body [data-short-value]').fill('这是一个合格短标题');
     await page.locator('.modal-foot button[data-save]').click();
     await waitFor(async () => (await page.locator('.card:has-text("UI 测试配置")').count()) > 0, { timeout: 10_000, label: '配置保存' });
     ok('发布配置保存成功');
+    const cardCountBeforeCopy = await page.locator('.card[data-config]').count();
+    await page.locator('.card:has-text("UI 测试配置")').first().locator('button:has-text("复制")').click();
+    await waitFor(async () => (await page.locator('.card[data-config]').count()) === cardCountBeforeCopy + 1, { timeout: 8000, label: '复制配置' });
+    ok('配置复制按钮可用（复制全部配置内容）');
 
     step('发布配置：创建任务');
     const configCard = page.locator('.card:has-text("UI 测试配置")').first();

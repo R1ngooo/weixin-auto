@@ -112,7 +112,6 @@ export const api = {
   deleteConfig: (id) => request(`/configs/${id}`, { method: 'DELETE' }),
   configSubjects: (id) => request(`/configs/${id}/subjects`),
   previewConfig: (id) => request(`/configs/${id}/preview`, { method: 'POST', body: {} }),
-  resetConfigPool: (id) => request(`/configs/${id}/reset-pool`, { method: 'POST', body: {} }),
 
   // 任务
   tasks: (query = {}) => request(`/tasks?${new URLSearchParams(query).toString()}`),

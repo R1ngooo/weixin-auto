@@ -22,7 +22,7 @@ export class TextService {
       params.push(like, like, like);
     }
     if (uploaded === 'yes') where.push("t.id IN (SELECT text_id FROM upload_history WHERE status IN ('success','unknown'))");
-    if (uploaded === 'no') where.push("t.id NOT IN (SELECT text_id FROM upload_history WHERE status IN ('success','unknown'))");
+    if (uploaded === 'no') where.push("t.id NOT IN (SELECT text_id FROM upload_history WHERE text_id IS NOT NULL AND status IN ('success','unknown'))");
     if (tagIds.length) {
       where.push(`t.id IN (SELECT text_id FROM text_tags WHERE tag_id IN (${tagIds.map(() => '?').join(',')}))`);
       params.push(...tagIds);
@@ -61,7 +61,7 @@ export class TextService {
     const where = [];
     const params = [];
     if (uploaded === 'yes') where.push("t.id IN (SELECT text_id FROM upload_history WHERE status IN ('success','unknown'))");
-    if (uploaded === 'no') where.push("t.id NOT IN (SELECT text_id FROM upload_history WHERE status IN ('success','unknown'))");
+    if (uploaded === 'no') where.push("t.id NOT IN (SELECT text_id FROM upload_history WHERE text_id IS NOT NULL AND status IN ('success','unknown'))");
     if (tagIds.length) {
       where.push(`t.id IN (SELECT text_id FROM text_tags WHERE tag_id IN (${tagIds.map(() => '?').join(',')}))`);
       params.push(...tagIds);

@@ -291,45 +291,63 @@ export function createApiRouter(ctx) {
   router.post('/configs/:id/preview', wrap(async (req) => {
     const record = configs.get(req.params.id);
     if (!record) throw new Error('发布配置不存在');
+    const config = configs.validateConfig({ ...record.config });
     const subjectList = configs.resolveSubjects(req.params.id, subjects);
-    const previews = subjectList.map((subject) => {
-      const useSubjectScope = record.config.pool?.scope === 'subject';
+    const perSubjectCount = config.videoSelection.perSubjectCount || 1;
+    const fixedVideoIds = config.videoSelection.fixedVideoIds || [];
+    const fixedTextIds = config.textSelection.fixedTextIds || [];
+    let fixedVideoCursor = 0;
+    let fixedTextCursor = 0;
+    const items = [];
+    for (const subject of subjectList) {
+      const useSubjectScope = config.pool?.scope === 'subject';
       const videoScope = useSubjectScope ? `${req.params.id}:${subject.id}` : req.params.id;
       const textScope = useSubjectScope ? `${req.params.id}:${subject.id}` : req.params.id;
-      const result = { subjectId: subject.id, subjectName: subject.name, subjectStatus: subject.status, video: null, text: null, error: null };
-      try {
-        result.video = picker.pickVideo({
-          scope: videoScope,
-          strategy: record.config.videoSelection.strategy,
-          tagIds: record.config.videoSelection.tags,
-          fixedId: record.config.videoSelection.fixedVideoId,
-          preferUnuploaded: record.config.videoSelection.preferUnuploaded,
-          requireUploaded: record.config.videoSelection.requireUploaded,
-          allowReset: record.config.pool.allowReset !== false,
-          peek: true,
-        });
-      } catch (error) { result.error = error.message; }
-      if (!result.error) {
+      for (let round = 1; round <= perSubjectCount; round += 1) {
+        const result = {
+          subjectId: subject.id,
+          subjectName: subject.name,
+          subjectStatus: subject.status,
+          round,
+          totalRounds: perSubjectCount,
+          video: null,
+          text: null,
+          error: null,
+        };
         try {
-          result.text = picker.pickText({
-            scope: textScope,
-            strategy: record.config.textSelection.strategy,
-            tagIds: record.config.textSelection.tags,
-            fixedId: record.config.textSelection.fixedTextId,
-            preferUnuploaded: record.config.textSelection.preferUnuploaded,
-            requireUploaded: record.config.textSelection.requireUploaded,
-            allowReset: record.config.pool.allowReset !== false,
+          result.video = picker.pickVideo({
+            scope: videoScope,
+            strategy: config.videoSelection.strategy,
+            tagIds: config.resourceTags,
+            fixedId: config.videoSelection.strategy === 'fixed' && fixedVideoIds.length
+              ? fixedVideoIds[fixedVideoCursor++ % fixedVideoIds.length]
+              : null,
+            fixedIds: fixedVideoIds,
+            requireUploaded: config.videoSelection.requireUploaded,
+            allowReset: config.pool.allowReset === true,
             peek: true,
           });
         } catch (error) { result.error = error.message; }
+        if (!result.error) {
+          try {
+            result.text = picker.pickText({
+              scope: textScope,
+              strategy: config.textSelection.strategy,
+              tagIds: config.resourceTags,
+              fixedId: config.textSelection.strategy === 'fixed' && fixedTextIds.length
+                ? fixedTextIds[fixedTextCursor++ % fixedTextIds.length]
+                : null,
+              fixedIds: fixedTextIds,
+              requireUploaded: config.textSelection.requireUploaded,
+              allowReset: config.pool.allowReset === true,
+              peek: true,
+            });
+          } catch (error) { result.error = error.message; }
+        }
+        items.push(result);
       }
-      return result;
-    });
-    return { config: record, items: previews };
-  }));
-  router.post('/configs/:id/reset-pool', wrap(async (req) => {
-    picker.resetPool(req.params.id);
-    return { reset: true };
+    }
+    return { config: record, items };
   }));
 
   // ---------- 任务 ----------

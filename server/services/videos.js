@@ -98,7 +98,7 @@ export class VideoService {
       params.push(like, like, like, like);
     }
     if (uploaded === 'yes') where.push('v.id IN (SELECT video_id FROM upload_history WHERE status IN (\'success\',\'unknown\'))');
-    if (uploaded === 'no') where.push('v.id NOT IN (SELECT video_id FROM upload_history WHERE status IN (\'success\',\'unknown\'))');
+    if (uploaded === 'no') where.push("v.id NOT IN (SELECT video_id FROM upload_history WHERE video_id IS NOT NULL AND status IN ('success','unknown'))");
     if (tagIds.length) {
       where.push(`v.id IN (SELECT video_id FROM video_tags WHERE tag_id IN (${tagIds.map(() => '?').join(',')}))`);
       params.push(...tagIds);
@@ -148,7 +148,7 @@ export class VideoService {
       params.push(...tagIds);
     }
     if (uploaded === 'yes') where.push('v.id IN (SELECT video_id FROM upload_history WHERE status IN (\'success\',\'unknown\'))');
-    if (uploaded === 'no') where.push('v.id NOT IN (SELECT video_id FROM upload_history WHERE status IN (\'success\',\'unknown\'))');
+    if (uploaded === 'no') where.push("v.id NOT IN (SELECT video_id FROM upload_history WHERE video_id IS NOT NULL AND status IN ('success','unknown'))");
     const rows = db().all(`SELECT v.* FROM videos v WHERE ${where.join(' AND ')} ORDER BY v.id`, ...params);
     const stats = new Map(db().all(VIDEO_STATS_SQL).map((row) => [Number(row.id), row]));
     return hydrateTags('video', rows).map((row) => ({

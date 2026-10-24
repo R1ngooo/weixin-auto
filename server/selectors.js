@@ -110,8 +110,7 @@ export const DEFAULT_SELECTORS = {
     collectionLabelText: '添加到合集',
     collectionTriggerTexts: ['选择合集'],
     collectionEmptyTexts: ['暂无合集', '还没有合集'],
-    originalCheckboxTexts: ['视频为原创', '声明原创'],
-    originalDialogConfirmTexts: ['声明原创'],
+    videoMarkLabelText: '视频标注',
     // 新版发表页把「原创声明」调整为「视频标注」下拉
     videoMarkLabelText: '视频标注',
     videoMarkTriggerTexts: ['选择视频标注'],

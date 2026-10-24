@@ -20,11 +20,10 @@ export class NotFoundError extends Error {
 }
 
 /**
- * 资源选择策略：
- *  - sequential    顺序：按 id 顺序循环（记录游标）
+ * 资源选择策略（已取消「顺序」策略）：
  *  - random        随机可重复
- *  - random-unique 随机不可重复（用尽后可按配置重置）
- *  - fixed         固定资源
+ *  - random-unique 随机不可重复（用尽后按配置决定是否自动重置）
+ *  - fixed         固定资源（可多个，候选范围受标签+使用状态过滤约束）
  */
 export class ResourcePicker {
   constructor({ videos, texts }) {
@@ -33,7 +32,7 @@ export class ResourcePicker {
   }
 
   pool(kind, { tagIds = [], preferUnuploaded = false, requireUploaded = null } = {}) {
-    const uploaded = requireUploaded === true ? 'yes' : requireUploaded === false ? 'no' : '';
+    const uploaded = requireUploaded === true ? 'yes' : requireUploaded === false ? 'no' : requireUploaded || '';
     const rows = kind === 'video'
       ? this.videos.all({ tagIds, uploaded })
       : this.texts.all({ tagIds, uploaded });
@@ -57,82 +56,71 @@ export class ResourcePicker {
     } catch { /* ignore */ }
   }
 
-  cursor(scope, kind) {
-    return Number(db().get('SELECT cursor FROM pool_cursor WHERE scope = ? AND kind = ?', scope, kind)?.cursor || 0);
-  }
-
-  setCursor(scope, kind, cursor) {
-    db().run(
-      `INSERT INTO pool_cursor (scope, kind, cursor) VALUES (?, ?, ?)
-       ON CONFLICT(scope, kind) DO UPDATE SET cursor = excluded.cursor`,
-      scope, kind, cursor,
-    );
-  }
-
   pick(kind, options) {
     const {
       scope = 'default',
-      strategy = 'sequential',
+      strategy = 'random-unique',
       tagIds = [],
       fixedId = null,
-      preferUnuploaded = false,
+      fixedIds = [],
       requireUploaded = null,
-      allowReset = true,
+      allowReset = false,
       peek = false,
-      peekOffset = 0,
       excludeIds = [],
     } = options || {};
 
-    if (strategy === 'fixed') {
-      const id = Number(fixedId);
+    const normalizedStrategy = strategy === 'sequential' ? 'random-unique' : strategy;
+
+    if (normalizedStrategy === 'fixed') {
+      const candidates = this.pool(kind, { tagIds, requireUploaded });
+      const allowedIds = new Set(candidates.map((row) => Number(row.id)));
+      const configuredIds = (Array.isArray(fixedIds) ? fixedIds : []).map((id) => Number(id)).filter(Boolean);
+      const chosenId = Number(fixedId) || configuredIds[0] || null;
+      const id = chosenId ? Number(chosenId) : null;
+      if (!id) throw new NotFoundError(kind === 'video' ? '未选择固定视频' : '未选择固定文本');
+      if (!allowedIds.has(id)) {
+        throw new NotFoundError(kind === 'video'
+          ? '固定视频不在所选标签/使用状态过滤范围内'
+          : '固定文本不在所选标签/使用状态过滤范围内');
+      }
       const row = kind === 'video' ? this.videos.get(id) : this.texts.get(id);
       if (!row) throw new NotFoundError(kind === 'video' ? '配置的固定视频不存在' : '配置的固定文本不存在');
       if (!peek) this.markUsed(scope, kind, id);
       return row;
     }
 
-    let candidates = this.pool(kind, { tagIds, preferUnuploaded, requireUploaded });
+    let candidates = this.pool(kind, { tagIds, requireUploaded });
     const excluded = new Set((excludeIds || []).map((id) => String(id)));
     if (excluded.size) candidates = candidates.filter((row) => !excluded.has(String(row.id)));
     if (!candidates.length) {
       throw new PoolExhaustedError(kind === 'video' ? '视频池中没有符合标签条件的视频' : '文本池中没有符合标签条件的文本');
     }
 
-    if (strategy === 'random') {
+    if (normalizedStrategy === 'random') {
       const row = candidates[Math.floor(Math.random() * candidates.length)];
       if (!peek) this.markUsed(scope, kind, row.id);
       return row;
     }
 
-    if (strategy === 'random-unique') {
-      const used = this.usedIds(scope, kind);
-      const unused = candidates.filter((row) => !used.has(String(row.id)));
-      if (!unused.length) {
-        // 试运行（peek）不做重置等写操作，避免污染使用状态
-        if (peek) {
-          const row = candidates[Math.floor(Math.random() * candidates.length)];
-          return row;
-        }
-        if (!allowReset) throw new PoolExhaustedError();
-        candidates = this.pool(kind, { tagIds, preferUnuploaded, requireUploaded })
-          .filter((row) => !excluded.has(String(row.id)));
-        if (!candidates.length) throw new PoolExhaustedError();
-        db().run('DELETE FROM pool_usage WHERE scope = ? AND kind = ?', scope, kind);
-      } else {
-        candidates = unused;
+    // random-unique（默认策略）
+    const used = this.usedIds(scope, kind);
+    const unused = candidates.filter((row) => !used.has(String(row.id)));
+    if (!unused.length) {
+      // 试运行（peek）不做重置等写操作，避免污染使用状态
+      if (peek) {
+        const row = candidates[Math.floor(Math.random() * candidates.length)];
+        return row;
       }
-      const row = candidates[Math.floor(Math.random() * candidates.length)];
-      if (!peek) this.markUsed(scope, kind, row.id);
-      return row;
+      if (!allowReset) throw new PoolExhaustedError();
+      candidates = this.pool(kind, { tagIds, requireUploaded })
+        .filter((row) => !excluded.has(String(row.id)));
+      if (!candidates.length) throw new PoolExhaustedError();
+      db().run('DELETE FROM pool_usage WHERE scope = ? AND kind = ?', scope, kind);
+    } else {
+      candidates = unused;
     }
-
-    // sequential（peekOffset 用于试运行时在内存中推进一步，不写游标）
-    const cursor = this.cursor(scope, kind);
-    const row = candidates[(cursor + (peek ? Math.max(0, Number(peekOffset) || 0) : 0)) % candidates.length];
-    if (!peek) {
-      this.setCursor(scope, kind, cursor + 1);
-      this.markUsed(scope, kind, row.id);
-    }
+    const row = candidates[Math.floor(Math.random() * candidates.length)];
+    if (!peek) this.markUsed(scope, kind, row.id);
     return row;
   }
 
@@ -142,17 +130,5 @@ export class ResourcePicker {
 
   pickText(options) {
     return this.pick('text', options);
-  }
-
-  resetPool(scope) {
-    db().run('DELETE FROM pool_usage WHERE scope = ?', scope);
-    db().run('DELETE FROM pool_cursor WHERE scope = ?', scope);
-  }
-
-  poolState(scope) {
-    return {
-      used: db().all('SELECT kind, COUNT(*) AS n FROM pool_usage WHERE scope = ? GROUP BY kind', scope),
-      cursors: db().all('SELECT kind, cursor FROM pool_cursor WHERE scope = ?', scope),
-    };
   }
 }

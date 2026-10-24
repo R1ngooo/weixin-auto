@@ -33,7 +33,8 @@ export class TaskService {
   create({ configId, overrides = {} }) {
     const record = this.configs.get(configId);
     if (!record) throw new Error('发布配置不存在');
-    const config = { ...record.config };
+    // 保存/执行前统一校验：短标题、定时、固定资源范围、主体等
+    const config = this.configs.validateConfig({ ...record.config });
     if (overrides.action === 'draft' || overrides.action === 'publish') config.action = overrides.action;
     const dryRun = Boolean(overrides.dryRun);
     // 演练测试环境：开启后演练模式照常计入素材使用状态与使用次数（默认不污染）
@@ -43,70 +44,80 @@ export class TaskService {
     const limit = Number(overrides.subjectLimit || 0);
     const subjectList = limit > 0 ? allSubjects.slice(0, limit) : allSubjects;
     if (!subjectList.length) throw new Error('该配置未关联任何主体，请先在配置中选择主体或标签');
+    const perSubjectCount = Math.max(1, Math.min(5,
+      Number.parseInt(overrides.perSubjectCount ?? config.videoSelection.perSubjectCount ?? 1, 10) || 1,
+    ));
+    config.videoSelection = { ...config.videoSelection, perSubjectCount };
 
     const id = uid('task_');
     const now = nowIso();
     const name = String(overrides.name || '').trim() || `${record.name} · ${new Date(now).toLocaleString('zh-CN', { hour12: false })}`;
     const items = [];
     let skipped = 0;
+    const fixedVideoIds = config.videoSelection.fixedVideoIds || [];
+    const fixedTextIds = config.textSelection.fixedTextIds || [];
+    let fixedVideoCursor = 0;
+    let fixedTextCursor = 0;
 
     for (const subject of subjectList) {
       const scope = this.resolveScope({ ...config, id: configId }, subject.id);
-      const item = {
-        id: uid('item_'),
-        subject,
-        video: null,
-        text: null,
-        pickError: null,
-      };
-      // 演练模式默认不消耗/不改变资源使用状态：使用 peek（只读预览）选择资源；
-      // 若开启「演练测试环境」，则按正常任务选择（记录使用状态与次数）。
-      const peekOptions = dryRunPeek ? {
-        peek: true,
-        peekOffset: items.filter((entry) => !entry.pickError).length,
-        excludeIds: [
-          ...items.map((entry) => entry.video?.id).filter(Boolean),
-        ],
-      } : {};
-      const peekTextOptions = dryRunPeek ? {
-        peek: true,
-        peekOffset: items.filter((entry) => !entry.pickError).length,
-        excludeIds: [
-          ...items.map((entry) => entry.text?.id).filter(Boolean),
-        ],
-      } : {};
-      try {
-        item.video = this.picker.pickVideo({
-          scope,
-          strategy: config.videoSelection.strategy,
-          tagIds: config.videoSelection.tags,
-          fixedId: config.videoSelection.fixedVideoId,
-          preferUnuploaded: config.videoSelection.preferUnuploaded,
-          requireUploaded: config.videoSelection.requireUploaded,
-          allowReset: config.pool.allowReset !== false,
-          ...peekOptions,
-        });
-      } catch (error) {
-        item.pickError = `视频选择失败：${error.message}`;
-      }
-      if (!item.pickError) {
+      for (let round = 0; round < perSubjectCount; round += 1) {
+        const item = {
+          id: uid('item_'),
+          subject,
+          video: null,
+          text: null,
+          pickError: null,
+        };
+        // 演练模式默认不消耗/不改变资源使用状态：使用 peek（只读预览）选择资源；
+        // 若开启「演练测试环境」，则按正常任务选择（记录使用状态与次数）。
+        const chosenVideos = items.map((entry) => entry.video?.id).filter(Boolean);
+        const chosenTexts = items.map((entry) => entry.text?.id).filter(Boolean);
+        const peekOptions = dryRunPeek
+          ? { peek: true, excludeIds: config.videoSelection.strategy === 'random-unique' ? chosenVideos : [] }
+          : {};
+        const peekTextOptions = dryRunPeek
+          ? { peek: true, excludeIds: config.textSelection.strategy === 'random-unique' ? chosenTexts : [] }
+          : {};
+        const fixedVideoId = config.videoSelection.strategy === 'fixed' && fixedVideoIds.length
+          ? fixedVideoIds[fixedVideoCursor++ % fixedVideoIds.length]
+          : null;
+        const fixedTextId = config.textSelection.strategy === 'fixed' && fixedTextIds.length
+          ? fixedTextIds[fixedTextCursor++ % fixedTextIds.length]
+          : null;
         try {
-          item.text = this.picker.pickText({
+          item.video = this.picker.pickVideo({
             scope,
-            strategy: config.textSelection.strategy,
-            tagIds: config.textSelection.tags,
-            fixedId: config.textSelection.fixedTextId,
-            preferUnuploaded: config.textSelection.preferUnuploaded,
-            requireUploaded: config.textSelection.requireUploaded,
-            allowReset: config.pool.allowReset !== false,
-            ...peekTextOptions,
+            strategy: config.videoSelection.strategy,
+            tagIds: config.resourceTags,
+            fixedId: fixedVideoId,
+            fixedIds: fixedVideoIds,
+            requireUploaded: config.videoSelection.requireUploaded,
+            allowReset: config.pool.allowReset === true,
+            ...peekOptions,
           });
         } catch (error) {
-          item.pickError = `文本选择失败：${error.message}`;
+          item.pickError = `视频选择失败：${error.message}`;
         }
+        if (!item.pickError) {
+          try {
+            item.text = this.picker.pickText({
+              scope,
+              strategy: config.textSelection.strategy,
+              tagIds: config.resourceTags,
+              fixedId: fixedTextId,
+              fixedIds: fixedTextIds,
+              requireUploaded: config.textSelection.requireUploaded,
+              allowReset: config.pool.allowReset === true,
+              ...peekTextOptions,
+            });
+          } catch (error) {
+            item.pickError = `文本选择失败：${error.message}`;
+          }
+        }
+        if (item.pickError) skipped += 1;
+        items.push(item);
       }
-      if (item.pickError) skipped += 1;
-      items.push(item);
     }
 
     const runnable = items.filter((item) => !item.pickError);

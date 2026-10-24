@@ -431,7 +431,7 @@ async function main() {
       }
     });
 
-    await check('发布配置创建与预览', async () => {
+    await check('发布配置创建与预览（标签组资源选择）', async () => {
       const config = await api('/configs', {
         method: 'POST',
         body: {
@@ -439,26 +439,137 @@ async function main() {
           config: {
             name: '冒烟测试配置',
             action: 'draft',
+            resourceTags: [state.videoTag, state.textTag],
             subjectSelection: { mode: 'ids', ids: [state.subject.id], tags: [] },
-            videoSelection: { tags: [state.videoTag], strategy: 'sequential', preferUnuploaded: true, requireUploaded: null },
-            textSelection: { tags: [state.textTag], strategy: 'sequential', preferUnuploaded: true, requireUploaded: null },
+            videoSelection: { strategy: 'random-unique', requireUploaded: 'no', perSubjectCount: 1 },
+            textSelection: { strategy: 'random-unique', requireUploaded: 'no' },
             pageOptions: {
               description: { enabled: true, prefix: '【前缀】', suffix: '【后缀】', hashtags: ['测试标签'] },
-              original: { enabled: false },
             },
+            pool: { allowReset: false, scope: 'config' },
             syncWechat: false,
           },
         },
       });
       state.config = config;
+      assert(config.config.resourceTags.length === 2, '资源标签应保存并统一作用于三类资源');
+      assert(!('original' in config.config.pageOptions), '已废弃的声明原创选项不应再返回');
       const preview = await api(`/configs/${config.id}/preview`, { method: 'POST', body: {} });
-      assert(preview.items.length === 1, '预览应有 1 个主体');
+      assert(preview.items.length === 1, '1 个主体 × 每主体 1 个视频应预览 1 项');
       assert(preview.items[0].video, '预览应选中视频');
       assert(preview.items[0].text, '预览应选中文本');
-      const previewAgain = await api(`/configs/${config.id}/preview`, { method: 'POST', body: {} });
-      assert(previewAgain.items[0].video.id === preview.items[0].video.id, '预览不应消耗顺序进度');
-      assert(previewAgain.items[0].text.id === preview.items[0].text.id, '预览不应消耗文本顺序进度');
-      return `视频 #${preview.items[0].video.id}，文本 #${preview.items[0].text.id}`;
+      const videosAfterPreview = await api('/videos?pageSize=50');
+      assert(videosAfterPreview.data.every((video) => video.uploadCount === 0), '预览不应写入使用状态');
+      return `资源标签 ${config.config.resourceTags.length} 个，视频 #${preview.items[0].video.id}，文本 #${preview.items[0].text.id}`;
+    });
+
+    await check('短标题校验（必填 + 6-16 字）', async () => {
+      const base = () => ({
+        name: '短标题校验配置',
+        resourceTags: [state.videoTag, state.textTag],
+        subjectSelection: { mode: 'ids', ids: [state.subject.id] },
+        videoSelection: { strategy: 'random', requireUploaded: '' },
+        textSelection: { strategy: 'random', requireUploaded: '' },
+        pageOptions: { description: { enabled: false }, shortTitle: { enabled: true, value: '' } },
+      });
+      let emptyError = '';
+      try { await api('/configs', { method: 'POST', body: { name: '短标题校验配置', config: base() } }); } catch (error) { emptyError = error.message; }
+      assert(/不能为空/.test(emptyError), `空短标题应被拒绝，实际：${emptyError}`);
+      let shortError = '';
+      try {
+        await api('/configs', { method: 'POST', body: { name: '短标题校验配置', config: { ...base(), pageOptions: { description: { enabled: false }, shortTitle: { enabled: true, value: '太短' } } } } });
+      } catch (error) { shortError = error.message; }
+      assert(/6-16/.test(shortError), `过短短标题应被拒绝，实际：${shortError}`);
+      const valid = await api('/configs', {
+        method: 'POST',
+        body: { name: '短标题校验配置', config: { ...base(), pageOptions: { description: { enabled: false }, shortTitle: { enabled: true, value: '这是一个合格短标题' } } } },
+      });
+      assert(valid.config.pageOptions.shortTitle.value === '这是一个合格短标题', '合法短标题应保存成功');
+      return '空值/过短被拒绝，6-16 字可保存';
+    });
+
+    await check('发表选项：定时校验与废弃字段清理', async () => {
+      const base = {
+        name: '定时校验配置',
+        resourceTags: [state.videoTag, state.textTag],
+        subjectSelection: { mode: 'ids', ids: [state.subject.id] },
+        videoSelection: { strategy: 'random', requireUploaded: '' },
+        textSelection: { strategy: 'random', requireUploaded: '' },
+        pool: { allowReset: false },
+      };
+      let pastError = '';
+      try {
+        await api('/configs', {
+          method: 'POST',
+          body: { name: '定时校验配置', config: { ...base, pageOptions: { scheduled: { enabled: true, value: new Date(Date.now() - 3600_000).toISOString() } } } },
+        });
+      } catch (error) { pastError = error.message; }
+      assert(/不能早于当前时间/.test(pastError), `过去的定时时间应被拒绝，实际：${pastError}`);
+      const future = new Date(Date.now() + 3600_000).toISOString();
+      const saved = await api('/configs', {
+        method: 'POST',
+        body: {
+          name: '定时校验配置',
+          config: {
+            ...base,
+            pageOptions: { scheduled: { enabled: true, value: future }, original: { enabled: true }, shortTitle: { enabled: false, fromVideoName: true, value: '旧值' } },
+          },
+        },
+      });
+      assert(saved.config.pageOptions.scheduled.value, '未来时间的定时发表应保存成功');
+      assert(!('original' in saved.config.pageOptions), '旧配置中的声明原创应被清理');
+      assert(!('fromVideoName' in saved.config.pageOptions.shortTitle), '旧配置中的使用视频文件名应被清理');
+      return '过去时间拒绝，未来时间可保存，废弃字段已清理';
+    });
+
+    await check('固定资源：标签+使用状态交集与多选循环分配', async () => {
+      const videos = await api('/videos?pageSize=50');
+      const texts = await api('/texts?pageSize=50');
+      const videoIds = videos.data.filter((video) => video.uploadCount === 0).slice(0, 2).map((video) => video.id);
+      const textId = texts.data[0].id;
+      assert(videoIds.length === 2, '需要至少 2 个未使用视频用于固定资源测试');
+      const config = await api('/configs', {
+        method: 'POST',
+        body: {
+          name: '固定资源配置',
+          config: {
+            name: '固定资源配置',
+            resourceTags: [state.videoTag, state.textTag],
+            subjectSelection: { mode: 'ids', ids: [state.subject.id] },
+            videoSelection: { strategy: 'fixed', fixedVideoIds: videoIds, requireUploaded: 'no', perSubjectCount: 2 },
+            textSelection: { strategy: 'fixed', fixedTextIds: [textId], requireUploaded: '' },
+            pool: { allowReset: false, scope: 'config' },
+          },
+        },
+      });
+      assert(config.config.videoSelection.fixedVideoIds.length === 2, '固定视频应为多选');
+      const task = await api('/tasks', { method: 'POST', body: { configId: config.id, overrides: { dryRun: true } } });
+      assert(task.total === 2, `每主体 2 个视频应创建 2 项，实际 ${task.total}`);
+      const picked = task.items.map((item) => item.videoId);
+      assert(picked[0] !== picked[1], '固定视频多选应按顺序循环分配，不应重复同一项');
+      assert(task.items.every((item) => item.textId === textId), '固定文本应分配给每一项');
+      return `固定视频 #${picked.join(' → ')}，固定文本 #${textId}`;
+    });
+
+    await check('每个主体数量上限 5', async () => {
+      const config = await api('/configs', {
+        method: 'POST',
+        body: {
+          name: '数量上限配置',
+          config: {
+            name: '数量上限配置',
+            resourceTags: [state.videoTag, state.textTag],
+            subjectSelection: { mode: 'ids', ids: [state.subject.id] },
+            videoSelection: { strategy: 'random', requireUploaded: '', perSubjectCount: 9 },
+            textSelection: { strategy: 'random', requireUploaded: '' },
+            pool: { allowReset: false, scope: 'config' },
+          },
+        },
+      });
+      assert(config.config.videoSelection.perSubjectCount === 5, '每主体数量应被限制为最多 5');
+      const task = await api('/tasks', { method: 'POST', body: { configId: config.id, overrides: { dryRun: true, perSubjectCount: 5 } } });
+      assert(task.total === 5, `单主体 5 个视频应创建 5 项，实际 ${task.total}`);
+      return `单主体任务项 ${task.total} 个`;
     });
 
     await check('创建演练任务', async () => {
@@ -471,45 +582,45 @@ async function main() {
     });
 
     await check('演练模式不消耗素材', async () => {
-      const before = await api(`/configs/${state.config.id}/preview`, { method: 'POST', body: {} });
       const task = await api('/tasks', { method: 'POST', body: { configId: state.config.id, overrides: { dryRun: true } } });
       assert(task.dryRun === true, '应标记为演练任务');
-      const after = await api(`/configs/${state.config.id}/preview`, { method: 'POST', body: {} });
-      assert(after.items[0].video.id === before.items[0].video.id, '演练任务不应推进视频选择进度');
-      assert(after.items[0].text.id === before.items[0].text.id, '演练任务不应推进文本选择进度');
       const videos = await api('/videos?pageSize=50');
       assert(videos.data.every((video) => video.uploadCount === 0), '演练任务不应增加使用次数');
-      return '选择进度与使用次数均未变化';
+      return '使用次数未变化';
     });
 
     await check('演练测试环境开关（开启后计入使用状态）', async () => {
       await api('/settings', { method: 'PUT', body: { testing: { dryRunCountsUsage: true } } });
       const settings = await api('/settings');
       assert(settings.settings.testing.dryRunCountsUsage === true, '演练测试环境开关未生效');
-      const before = await api(`/configs/${state.config.id}/preview`, { method: 'POST', body: {} });
+      const usageCount = async () => withDb((db) => Number(db.prepare('SELECT COUNT(*) AS n FROM pool_usage WHERE scope = ?').get(state.config.id)?.n || 0));
+      const before = await usageCount();
       const task = await api('/tasks', { method: 'POST', body: { configId: state.config.id, overrides: { dryRun: true } } });
       assert(task.dryRun === true, '应仍为演练任务');
-      const after = await api(`/configs/${state.config.id}/preview`, { method: 'POST', body: {} });
-      assert(after.items[0].video.id !== before.items[0].video.id, '开启测试环境后演练任务应消耗视频选择进度');
+      const after = await usageCount();
+      assert(after > before, '开启测试环境后演练任务应写入使用状态');
       await api('/settings', { method: 'PUT', body: { testing: { dryRunCountsUsage: false } } });
       const restored = await api('/settings');
       assert(restored.settings.testing.dryRunCountsUsage === false, '关闭开关未生效');
       return '开启计入 / 关闭恢复';
     });
 
-    await check('随机不可重复策略', async () => {
+    await check('随机不可重复用尽后自动重置', async () => {
       const base = structuredClone(state.config.config);
       base.name = '随机策略配置';
-      base.videoSelection = { tags: [state.videoTag], strategy: 'random-unique', preferUnuploaded: false, requireUploaded: null };
-      base.textSelection = { tags: [state.textTag], strategy: 'random', preferUnuploaded: false, requireUploaded: null };
+      base.videoSelection = { strategy: 'random-unique', requireUploaded: 'no', perSubjectCount: 1 };
+      base.textSelection = { strategy: 'random', requireUploaded: 'no' };
+      base.pool = { allowReset: true, scope: 'config' };
       const config = await api('/configs', { method: 'POST', body: { name: base.name, config: base } });
-      const first = await api('/tasks', { method: 'POST', body: { configId: config.id, overrides: {} } });
-      const second = await api('/tasks', { method: 'POST', body: { configId: config.id, overrides: {} } });
-      assert(first.items[0].videoId !== second.items[0].videoId, '随机不可重复策略应选中不同视频');
-      await api(`/configs/${config.id}/reset-pool`, { method: 'POST', body: {} });
-      const third = await api('/tasks', { method: 'POST', body: { configId: config.id, overrides: {} } });
-      assert(third.total === 1, '重置选择进度后应能继续分配资源');
-      return `视频 #${first.items[0].videoId} → #${second.items[0].videoId}`;
+      const videoIds = [];
+      for (let index = 0; index < 4; index += 1) {
+        const task = await api('/tasks', { method: 'POST', body: { configId: config.id, overrides: {} } });
+        assert(task.total === 1, `第 ${index + 1} 次任务应成功分配资源`);
+        videoIds.push(task.items[0].videoId);
+      }
+      assert(new Set(videoIds.slice(0, 3)).size === 3, `前三轮应使用不同视频，实际 ${videoIds.join(',')}`);
+      assert(videoIds.length === 4, '资源用尽后应自动重置并继续分配');
+      return `视频 #${videoIds.join(' → ')}（用尽后自动重置）`;
     });
 
     await check('执行任务（未登录应失败并记录原因）', async () => {
