@@ -97,12 +97,28 @@ export function createApiRouter(ctx) {
     return subjects.update(req.params.id, patch);
   }));
 
+  router.get('/subjects/duplicates', wrap(async () => subjects.mergeDuplicates({ dryRun: true })));
+  router.post('/subjects/dedupe', wrap(async () => {
+    const result = await subjects.mergeDuplicates();
+    subjects.normalizeNames();
+    const repaired = subjects.repairSubjectReferences();
+    const indexes = subjects.ensureUniqueIndexes();
+    return { ...result, repaired, indexes };
+  }));
+
   router.delete('/subjects/:id', wrap(async (req) => {
     const subject = subjects.get(req.params.id);
     if (!subject) throw new Error('主体不存在');
-    await browser.removeProfile(req.params.id);
+    // 先取消该主体进行中的扫码登录，避免删除后后台仍在使用
+    const loginCancelled = login.cancelForSubject(req.params.id);
+    // 先删数据库记录（历史执行记录保留），确保界面立即生效
     subjects.remove(req.params.id);
-    return { removed: true };
+    // 浏览器关闭/登录态目录清理放到后台执行，避免接口被浏览器关闭阻塞
+    const backupDir = path.join(PATHS.profiles, '_deleted');
+    browser.removeProfile(req.params.id, { backupDir }).then((result) => {
+      if (result?.backupPath) console.log(`[subjects] 已备份被删除主体的登录态：${result.backupPath}`);
+    }).catch((error) => console.error('[subjects] 清理主体登录态失败：', String(error?.message || error)));
+    return { removed: true, loginCancelled, profileBackup: backupDir };
   }));
 
   router.post('/subjects/login', wrap(async (req) => login.start(req.body || {})));
@@ -112,6 +128,7 @@ export function createApiRouter(ctx) {
     return attempt;
   }));
   router.post('/subjects/login/:attemptId/refresh', wrap(async (req) => login.requestRefresh(req.params.attemptId)));
+  router.post('/subjects/login/:attemptId/open-browser', wrap(async (req) => login.openBrowser(req.params.attemptId)));
   router.post('/subjects/login/:attemptId/cancel', wrap(async (req) => login.cancel(req.params.attemptId)));
 
   router.post('/subjects/check-all', wrap(async (req) => session.checkAll({

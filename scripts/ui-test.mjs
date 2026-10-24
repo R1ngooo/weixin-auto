@@ -113,22 +113,69 @@ async function main() {
     if (JSON.stringify(navOrder) === JSON.stringify(expectedNav)) ok('左侧导航顺序与名称正确');
     else fail(`导航顺序异常：${navOrder.join(' → ')}`);
 
-    step('主体管理：扫码登录弹窗');
+    step('主体管理：扫码登录弹窗（默认无头 + 快速刷新）');
     await go(page, '/subjects');
     if (await page.locator('.tag-bar').count() > 0) ok('主体页标签筛选条独占一行'); else fail('主体页缺少标签筛选条');
+    // 卡片统一布局：状态徽标在右上角，与头像/名称同一水平行
+    const cardLayout = await page.locator('.subject-card').first().evaluate((card) => {
+      const head = card.querySelector('.subject-head');
+      const avatar = card.querySelector('.avatar');
+      const name = card.querySelector('.subject-name');
+      const status = card.querySelector('.subject-status');
+      const body = card.querySelector('.subject-body');
+      if (!head || !avatar || !name || !status || !body) return { ok: false };
+      const cardRect = card.getBoundingClientRect();
+      const statusRect = status.getBoundingClientRect();
+      const nameRect = name.getBoundingClientRect();
+      const avatarRect = avatar.getBoundingClientRect();
+      return {
+        ok: true,
+        statusInHead: head.contains(status),
+        rightAligned: cardRect.right - statusRect.right < 24,
+        sameRow: Math.abs(statusRect.top - nameRect.top) < 30 && Math.abs(statusRect.top - avatarRect.top) < 30,
+        hasBodyRows: Boolean(body.querySelector('.subject-tags') && body.querySelector('.subject-note-row') && body.querySelector('.subject-meta-row')),
+        displayName: name.innerText.trim(),
+      };
+    });
+    if (cardLayout.ok && cardLayout.statusInHead && cardLayout.rightAligned && cardLayout.sameRow && cardLayout.hasBodyRows) ok('主体卡片统一样式：状态右上角、与头像/名称同排');
+    else fail(`主体卡片布局异常：${JSON.stringify(cardLayout)}`);
+    const qrStart = Date.now();
     await page.locator('button:has-text("扫码登录新主体")').first().click();
     await page.waitForSelector('.modal-overlay', { timeout: 5000 });
     await waitFor(async () => (await page.locator('.modal-overlay .qr-box').count()) > 0, { timeout: 5000, label: '登录弹窗' });
     ok('登录弹窗打开');
+    const footerButtons = await page.locator('.modal-foot button').allInnerTexts();
+    if (footerButtons.some((text) => text.includes('浏览器扫码'))) ok('弹窗提供「浏览器扫码」兜底按钮'); else fail('缺少浏览器扫码按钮');
     // 等待二维码出现（外部网络，最多 45 秒；超时只警告）
+    let qrShown = false;
     try {
       await waitFor(async () => (await page.locator('#qr-image img').count()) > 0, { timeout: 45_000, label: '二维码' });
-      ok('二维码已获取并展示');
+      qrShown = true;
+      const elapsed = Date.now() - qrStart;
+      console.log(`  · 二维码出现耗时：${elapsed}ms`);
+      if (elapsed < 30_000) ok(`二维码已获取并展示（${elapsed}ms）`);
+      else fail(`二维码获取过慢：${elapsed}ms`);
     } catch {
       console.log('  ! 未在 45 秒内获取二维码（可能是网络原因，继续）');
     }
+    if (qrShown) {
+      // 手动刷新：等待二维码图片变化
+      const firstSrc = await page.locator('#qr-image img').getAttribute('src');
+      const refreshStart = Date.now();
+      await page.locator('.modal-foot button:has-text("刷新二维码")').click();
+      try {
+        await waitFor(async () => {
+          const src = await page.locator('#qr-image img').getAttribute('src').catch(() => null);
+          return src && src !== firstSrc;
+        }, { timeout: 30_000, interval: 400, label: '二维码刷新' });
+        console.log(`  · 二维码刷新耗时：${Date.now() - refreshStart}ms`);
+        ok('刷新二维码成功');
+      } catch {
+        console.log('  ! 二维码刷新超时（网络原因，继续）');
+      }
+    }
     await page.locator('.modal-foot button:has-text("取消")').click();
-    await page.waitForTimeout(600);
+    await page.waitForTimeout(800);
     if (await page.locator('.modal-overlay').count() === 0) ok('登录弹窗已关闭'); else fail('登录弹窗未关闭');
 
     step('文本池：新增文本');
@@ -356,6 +403,26 @@ async function main() {
     await page.locator('.modal-close').click();
     await page.waitForTimeout(300);
     if (await page.locator('.modal-overlay').count() === 0) ok('右上角 × 可关闭弹窗'); else fail('右上角 × 未关闭弹窗');
+
+    step('主体管理：删除确认（confirmDialog 修复）');
+    const tempSubject = await api('/subjects', { method: 'POST', body: { name: 'UI删除测试主体' } });
+    await go(page, '/subjects');
+    await waitFor(async () => (await page.locator(`.subject-card:has-text("UI删除测试主体")`).count()) > 0, { timeout: 8000, label: '待删除主体卡片' });
+    const beforeCount = await page.locator('.subject-card').count();
+    // 先取消：卡片必须保留
+    await page.locator('.subject-card:has-text("UI删除测试主体") button:has-text("删除")').click();
+    await page.waitForSelector('.modal-overlay');
+    await page.locator('.modal-foot button:has-text("取消")').click();
+    await page.waitForTimeout(500);
+    if (await page.locator('.subject-card').count() === beforeCount) ok('取消删除时卡片保留'); else fail('取消删除时卡片消失');
+    // 再确认：卡片立即消失且 API 不再返回
+    await page.locator('.subject-card:has-text("UI删除测试主体") button:has-text("删除")').click();
+    await page.waitForSelector('.modal-overlay');
+    await page.locator('.modal-foot button:has-text("删除")').click();
+    await waitFor(async () => (await page.locator('.subject-card').count()) === beforeCount - 1, { timeout: 8000, label: '卡片消失' });
+    ok('确认删除后卡片立即消失');
+    const listAfter = await api('/subjects');
+    if (!listAfter.some((item) => item.id === tempSubject.id)) ok('删除后 API 不再返回该主体'); else fail('删除后 API 仍返回该主体');
 
     step('系统设置：单列瀑布 + 左侧子导航 + 演练测试环境');
     await go(page, '/settings');

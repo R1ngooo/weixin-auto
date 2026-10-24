@@ -80,8 +80,8 @@ export const dashboardPage = {
                   <div class="row">
                     ${subject.avatarUrl ? `<img class="avatar" style="width:34px;height:34px" src="${esc(subject.avatarUrl)}" alt="" referrerpolicy="no-referrer">` : '<div class="avatar" style="width:34px;height:34px;font-size:13px">主</div>'}
                     <div>
-                      <div>${esc(subject.name)}</div>
-                      <div class="small muted-2">${esc(subject.wechatNickname || subject.finderNickname || '未识别账号')} · 检查于 ${esc(subject.lastCheckAt ? timeAgo(subject.lastCheckAt) : '未检查')}</div>
+                      <div>${esc(subject.displayName || subject.name)}</div>
+                      <div class="small muted-2">${esc(subject.wechatNickname || subject.finderUsername || '未识别账号')} · 检查于 ${esc(subject.lastCheckAt ? timeAgo(subject.lastCheckAt) : '未检查')}</div>
                     </div>
                   </div>
                   ${statusBadge(subject.status, SUBJECT_STATUS)}

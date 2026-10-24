@@ -93,14 +93,27 @@ export function modal({ title, body, footer = '', wide = false, xwide = false, o
 
 export function confirmDialog({ title = '确认操作', message = '', okText = '确定', cancelText = '取消', danger = false }) {
   return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
     const dialog = modal({
       title,
       body: `<div style="white-space:pre-wrap;line-height:1.7">${esc(message)}</div>`,
       footer: `<button class="btn" data-cancel>${esc(cancelText)}</button><button class="btn ${danger ? 'danger' : 'primary'}" data-ok>${esc(okText)}</button>`,
-      onClose: () => resolve(false),
+      // 注意：必须先决断再 close，close 会同步触发 onClose；否则「确定」会被 onClose 的 false 抢先
+      onClose: () => finish(false),
     });
-    dialog.foot.querySelector('[data-ok]').addEventListener('click', () => { dialog.close(); resolve(true); });
-    dialog.foot.querySelector('[data-cancel]').addEventListener('click', () => { dialog.close(); resolve(false); });
+    dialog.foot.querySelector('[data-ok]').addEventListener('click', () => {
+      finish(true);
+      dialog.close();
+    });
+    dialog.foot.querySelector('[data-cancel]').addEventListener('click', () => {
+      finish(false);
+      dialog.close();
+    });
   });
 }
 

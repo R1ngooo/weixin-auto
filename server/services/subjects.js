@@ -1,3 +1,7 @@
+import fsp from 'node:fs/promises';
+import fs from 'node:fs';
+import path from 'node:path';
+import { PATHS } from '../config.js';
 import { getDb } from '../db.js';
 import { nowIso, uid } from '../util.js';
 
@@ -83,15 +87,21 @@ export class SubjectService {
   decorate(row) {
     let extra = {};
     try { extra = row.extra_json ? JSON.parse(row.extra_json) : {}; } catch { extra = {}; }
+    const finderNickname = row.finder_nickname || '';
+    const finderUsername = row.finder_username || '';
+    const wechatNickname = row.wechat_nickname || '';
+    const name = row.name || '';
     return {
       id: row.id,
-      name: row.name,
+      name,
+      // 显示以视频号名称为主：视频号昵称 → 视频号ID → 手动名称/微信昵称
+      displayName: finderNickname || finderUsername || name || wechatNickname,
       note: row.note || '',
       avatarUrl: row.avatar_url || '',
       wechatId: row.wechat_id || '',
-      wechatNickname: row.wechat_nickname || '',
-      finderUsername: row.finder_username || '',
-      finderNickname: row.finder_nickname || '',
+      wechatNickname,
+      finderUsername,
+      finderNickname,
       identityKey: row.identity_key || '',
       identityType: extra.identityType || '',
       status: row.status || 'unknown',
@@ -180,7 +190,329 @@ export class SubjectService {
     };
     if (identity.name) patch.name = identity.name;
     if (identity.displayName && identity.displayName !== identity.name) patch.finderNickname = identity.finderNickname || identity.displayName;
+    // 显示以视频号名称为主：有视频号昵称/ID 时把 name 归一为视频号名称
+    const preferredName = identity.finderNickname || identity.finderUsername;
+    if (preferredName) patch.name = preferredName;
     return this.update(id, patch);
+  }
+
+  /** 查找与候选身份重复的其他主体（按视频号ID → 微信身份 → 视频号名称 → 微信ID 优先级） */
+  findDuplicate(candidate = {}, excludeId = null) {
+    const exclude = excludeId ? String(excludeId) : null;
+    const rows = db().all('SELECT * FROM subjects').filter((row) => String(row.id) !== exclude);
+    const norm = (value) => String(value || '').trim().toLowerCase();
+    const finderUsername = norm(candidate.finderUsername);
+    const identityKey = String(candidate.identityKey || '').trim();
+    const finderNickname = norm(candidate.finderNickname);
+    const wechatId = norm(candidate.wechatId);
+    const match = (predicate) => rows.find(predicate);
+    const row = (finderUsername && match((item) => norm(item.finder_username) === finderUsername))
+      || (identityKey && match((item) => String(item.identity_key || '').trim() === identityKey))
+      || (finderNickname && match((item) => norm(item.finder_nickname) === finderNickname))
+      || (wechatId && match((item) => norm(item.wechat_id) === wechatId));
+    return row ? this.get(row.id) : null;
+  }
+
+  /** 把现有主体名称归一为视频号名称（无视频号信息时保留原名称） */
+  normalizeNames() {
+    const rows = db().all('SELECT id, name, finder_nickname FROM subjects');
+    let changed = 0;
+    for (const row of rows) {
+      const finder = String(row.finder_nickname || '').trim();
+      if (finder && row.name !== finder) {
+        db().run('UPDATE subjects SET name = ?, updated_at = ? WHERE id = ?', finder, nowIso(), row.id);
+        changed += 1;
+      }
+    }
+    return changed;
+  }
+
+  /** 修复发布配置/任务中指向已合并（不存在）主体的 subjectIds（按合并备份的名称映射到保留主体） */
+  repairSubjectReferences() {
+    const existing = db().all('SELECT id, name, finder_nickname, finder_username FROM subjects');
+    const existingIds = new Set(existing.map((row) => String(row.id)));
+    const norm = (value) => String(value || '').trim().toLowerCase();
+    const byKey = new Map();
+    for (const row of existing) {
+      const key = norm(row.finder_nickname) || norm(row.name);
+      if (key && !byKey.has(key)) byKey.set(key, String(row.id));
+    }
+    const mapping = new Map();
+    let files = [];
+    try {
+      files = fs.readdirSync(PATHS.backups).filter((file) => /^subjects-merge-.*\.json$/.test(file)).sort().reverse();
+    } catch { files = []; }
+    for (const file of files) {
+      let rows = [];
+      try { rows = JSON.parse(fs.readFileSync(path.join(PATHS.backups, file), 'utf8')); } catch { continue; }
+      for (const row of rows) {
+        if (!row?.id || existingIds.has(String(row.id))) continue;
+        const key = norm(row.finder_nickname) || norm(row.name);
+        const keeper = key ? byKey.get(key) : null;
+        if (keeper) mapping.set(String(row.id), keeper);
+      }
+    }
+    let fixed = 0;
+    let removed = 0;
+    const rewrite = (table) => {
+      for (const record of db().all(`SELECT id, config_json FROM ${table}`)) {
+        let json = null;
+        try { json = JSON.parse(record.config_json); } catch { json = null; }
+        const ids = json?.subjectSelection?.ids;
+        if (!Array.isArray(ids)) continue;
+        let changed = false;
+        const next = ids.map((id) => {
+          const key = String(id);
+          if (existingIds.has(key)) return key;
+          const mapped = mapping.get(key);
+          if (mapped && existingIds.has(mapped)) {
+            changed = true;
+            return mapped;
+          }
+          changed = true;
+          removed += 1;
+          return null;
+        }).filter(Boolean);
+        if (!changed) continue;
+        json.subjectSelection.ids = [...new Set(next)];
+        if (table === 'publish_configs') {
+          db().run('UPDATE publish_configs SET config_json = ?, updated_at = ? WHERE id = ?', JSON.stringify(json), nowIso(), record.id);
+        } else {
+          db().run(`UPDATE ${table} SET config_json = ? WHERE id = ?`, JSON.stringify(json), record.id);
+        }
+        fixed += 1;
+      }
+    };
+    rewrite('publish_configs');
+    rewrite('tasks');
+    return { fixed, removed, mappings: mapping.size };
+  }
+
+  /** 创建视频号名称/ID 的唯一索引（重复合并后执行） */
+  ensureUniqueIndexes() {
+    const results = {};
+    try {
+      db().exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_subjects_finder_username ON subjects(finder_username) WHERE finder_username IS NOT NULL AND finder_username <> \'\'');
+      results.finderUsername = true;
+    } catch (error) {
+      results.finderUsername = String(error?.message || error);
+    }
+    try {
+      db().exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_subjects_finder_nickname ON subjects(lower(finder_nickname)) WHERE finder_nickname IS NOT NULL AND finder_nickname <> \'\'');
+      results.finderNickname = true;
+    } catch (error) {
+      results.finderNickname = String(error?.message || error);
+    }
+    return results;
+  }
+
+  /**
+   * 合并重复主体（按视频号ID/微信身份/视频号名称/微信ID 建并查集）。
+   * 保留规则：active 优先 → 有 identityKey/finderUsername → 最近登录 → 创建更早。
+   * 被合并行的标签并集、历史记录改指向保留主体；被合并行与 profile 目录备份，不直接丢弃。
+   */
+  async mergeDuplicates({ dryRun = false, profileBackupRoot = null } = {}) {
+    const rows = db().all('SELECT * FROM subjects');
+    const parent = new Map(rows.map((row) => [String(row.id), String(row.id)]));
+    const find = (id) => {
+      let current = id;
+      while (parent.get(current) !== current) {
+        parent.set(current, parent.get(parent.get(current)));
+        current = parent.get(current);
+      }
+      return current;
+    };
+    const union = (a, b) => {
+      const rootA = find(a);
+      const rootB = find(b);
+      if (rootA !== rootB) parent.set(rootB, rootA);
+    };
+    const keyFirst = new Map();
+    const norm = (value) => String(value || '').trim().toLowerCase();
+    const keyOf = (row) => {
+      const keys = [];
+      if (norm(row.finder_username)) keys.push(`fu:${norm(row.finder_username)}`);
+      if (String(row.identity_key || '').trim()) keys.push(`ik:${String(row.identity_key).trim()}`);
+      if (norm(row.finder_nickname)) keys.push(`fn:${norm(row.finder_nickname)}`);
+      if (norm(row.wechat_id)) keys.push(`wx:${norm(row.wechat_id)}`);
+      return keys;
+    };
+    for (const row of rows) {
+      for (const key of keyOf(row)) {
+        if (keyFirst.has(key)) union(String(row.id), keyFirst.get(key));
+        else keyFirst.set(key, String(row.id));
+      }
+    }
+    const groups = new Map();
+    for (const row of rows) {
+      const root = find(String(row.id));
+      if (!groups.has(root)) groups.set(root, []);
+      groups.get(root).push(row);
+    }
+    const statusRank = { active: 5, expired: 4, unknown: 3, pending: 2, failed: 1 };
+    const rank = (row) => [
+      statusRank[row.status] || 0,
+      (row.identity_key || row.finder_username) ? 1 : 0,
+      String(row.last_login_at || ''),
+      -Date.parse(row.created_at || 0),
+    ];
+    const compare = (a, b) => {
+      const ra = rank(a);
+      const rb = rank(b);
+      for (let i = 0; i < ra.length; i += 1) {
+        if (ra[i] === rb[i]) continue;
+        return ra[i] > rb[i] ? -1 : 1;
+      }
+      return 0;
+    };
+
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const backupFile = path.join(PATHS.backups, `subjects-merge-${stamp}.json`);
+    const plans = [];
+    for (const group of groups.values()) {
+      if (group.length < 2) continue;
+      const sorted = [...group].sort(compare);
+      const keeper = sorted[0];
+      const dropped = sorted.slice(1);
+      const firstNonEmpty = (field) => {
+        for (const row of sorted) if (String(row[field] || '').trim()) return row[field];
+        return null;
+      };
+      const latest = (field) => sorted.map((row) => String(row[field] || '')).filter(Boolean).sort().pop() || null;
+      const earliest = sorted.map((row) => String(row.created_at || '')).filter(Boolean).sort()[0] || keeper.created_at;
+      let extra = {};
+      try { extra = keeper.extra_json ? JSON.parse(keeper.extra_json) : {}; } catch { extra = {}; }
+      const finderList = [];
+      const seenFinders = new Set();
+      for (const row of sorted) {
+        let rowExtra = {};
+        try { rowExtra = row.extra_json ? JSON.parse(row.extra_json) : {}; } catch { rowExtra = {}; }
+        for (const finder of rowExtra.finderList || []) {
+          const key = String(finder?.finderUsername || finder?.nickname || JSON.stringify(finder));
+          if (seenFinders.has(key)) continue;
+          seenFinders.add(key);
+          finderList.push(finder);
+        }
+      }
+      const note = [...new Set(sorted.map((row) => String(row.note || '').trim()).filter(Boolean))].join('；');
+      const merged = {
+        id: keeper.id,
+        keep: keeper,
+        dropped,
+        name: firstNonEmpty('finder_nickname') || keeper.name,
+        finder_nickname: firstNonEmpty('finder_nickname'),
+        finder_username: firstNonEmpty('finder_username'),
+        wechat_id: firstNonEmpty('wechat_id'),
+        wechat_nickname: firstNonEmpty('wechat_nickname'),
+        avatar_url: firstNonEmpty('avatar_url'),
+        identity_key: firstNonEmpty('identity_key'),
+        status: keeper.status,
+        status_detail: firstNonEmpty('status_detail'),
+        last_login_at: latest('last_login_at'),
+        last_check_at: latest('last_check_at'),
+        note,
+        created_at: earliest,
+        extra: { ...extra, finderList, mergedAt: nowIso(), mergedFrom: dropped.map((row) => row.id) },
+      };
+      plans.push(merged);
+    }
+    if (dryRun) {
+      return { dryRun: true, groups: plans.map((plan) => ({ keeper: plan.id, dropped: plan.dropped.map((row) => row.id), name: plan.name })) };
+    }
+    if (!plans.length) return { mergedGroups: 0, droppedIds: [], backupFile: null };
+    fs.mkdirSync(PATHS.backups, { recursive: true });
+    const backupRows = plans.flatMap((plan) => plan.dropped);
+    db().transaction(() => {
+      for (const plan of plans) {
+        const keeperId = String(plan.id);
+        const droppedIds = plan.dropped.map((row) => String(row.id));
+        // 标签并集
+        const tagIds = new Set(db().all(
+          `SELECT tag_id FROM subject_tags WHERE subject_id IN (${[keeperId, ...droppedIds].map(() => '?').join(',')})`,
+          keeperId, ...droppedIds,
+        ).map((row) => Number(row.tag_id)));
+        for (const tagId of tagIds) db().run('INSERT OR IGNORE INTO subject_tags (subject_id, tag_id) VALUES (?, ?)', keeperId, tagId);
+        for (const droppedId of droppedIds) {
+          db().run('DELETE FROM subject_tags WHERE subject_id = ?', droppedId);
+          db().run('UPDATE upload_history SET subject_id = ? WHERE subject_id = ?', keeperId, droppedId);
+          db().run('UPDATE task_items SET subject_id = ?, subject_name = ? WHERE subject_id = ?', keeperId, plan.name, droppedId);
+        }
+        // 发布配置/任务中的 subjectIds 重映射
+        for (const config of db().all('SELECT id, config_json FROM publish_configs')) {
+          let json = null;
+          try { json = JSON.parse(config.config_json); } catch { json = null; }
+          if (!json?.subjectSelection?.ids) continue;
+          const ids = [...new Set(json.subjectSelection.ids.map((id) => (droppedIds.includes(String(id)) ? keeperId : String(id))))];
+          if (JSON.stringify(ids) === JSON.stringify(json.subjectSelection.ids)) continue;
+          json.subjectSelection.ids = ids;
+          db().run('UPDATE publish_configs SET config_json = ?, updated_at = ? WHERE id = ?', JSON.stringify(json), nowIso(), config.id);
+        }
+        for (const task of db().all('SELECT id, config_json FROM tasks')) {
+          let json = null;
+          try { json = JSON.parse(task.config_json); } catch { json = null; }
+          if (!json?.subjectSelection?.ids) continue;
+          const ids = [...new Set(json.subjectSelection.ids.map((id) => (droppedIds.includes(String(id)) ? keeperId : String(id))))];
+          if (JSON.stringify(ids) === JSON.stringify(json.subjectSelection.ids)) continue;
+          json.subjectSelection.ids = ids;
+          db().run('UPDATE tasks SET config_json = ? WHERE id = ?', JSON.stringify(json), task.id);
+        }
+        db().run(
+          `UPDATE subjects SET name = ?, finder_nickname = ?, finder_username = ?, wechat_id = ?, wechat_nickname = ?,
+             avatar_url = ?, identity_key = ?, status = ?, status_detail = ?, last_login_at = ?, last_check_at = ?,
+             note = ?, created_at = ?, extra_json = ?, updated_at = ? WHERE id = ?`,
+          plan.name, plan.finder_nickname, plan.finder_username, plan.wechat_id, plan.wechat_nickname,
+          plan.avatar_url, plan.identity_key, plan.status, plan.status_detail, plan.last_login_at, plan.last_check_at,
+          plan.note, plan.created_at, JSON.stringify(plan.extra), nowIso(), keeperId,
+        );
+        for (const droppedId of droppedIds) db().run('DELETE FROM subjects WHERE id = ?', droppedId);
+      }
+    });
+    try {
+      fs.mkdirSync(PATHS.backups, { recursive: true });
+      fs.writeFileSync(backupFile, JSON.stringify(backupRows, null, 2), 'utf8');
+    } catch { /* 文件备份失败不阻塞合并 */ }
+    // 处理 profile 目录：保留对象无目录时接管被合并目录，其余移动到 _merged 备份
+    const profileRoot = profileBackupRoot || path.join(PATHS.profiles, '_merged', stamp);
+    const profileMoves = [];
+    for (const plan of plans) {
+      const keeperDir = path.join(PATHS.profiles, String(plan.id));
+      let keeperUsable = false;
+      try {
+        keeperUsable = fs.existsSync(keeperDir) && (await fsp.readdir(keeperDir)).length > 0;
+      } catch { keeperUsable = false; }
+      for (const dropped of plan.dropped) {
+        const droppedDir = path.join(PATHS.profiles, String(dropped.id));
+        if (!fs.existsSync(droppedDir)) continue;
+        try {
+          if (!keeperUsable) {
+            await fsp.rm(keeperDir, { recursive: true, force: true }).catch(() => undefined);
+            await fsp.mkdir(path.dirname(keeperDir), { recursive: true });
+            await fsp.rename(droppedDir, keeperDir);
+            keeperUsable = true;
+            profileMoves.push({ id: dropped.id, action: 'take-over' });
+          } else {
+            await fsp.mkdir(profileRoot, { recursive: true });
+            await fsp.rename(droppedDir, path.join(profileRoot, String(dropped.id)));
+            profileMoves.push({ id: dropped.id, action: 'backup' });
+          }
+        } catch {
+          try {
+            await fsp.mkdir(profileRoot, { recursive: true });
+            await fsp.cp(droppedDir, path.join(profileRoot, String(dropped.id)), { recursive: true, force: true });
+            await fsp.rm(droppedDir, { recursive: true, force: true });
+            profileMoves.push({ id: dropped.id, action: 'backup-copy' });
+          } catch { profileMoves.push({ id: dropped.id, action: 'failed' }); }
+        }
+      }
+    }
+    return {
+      mergedGroups: plans.length,
+      droppedIds: plans.flatMap((plan) => plan.dropped.map((row) => row.id)),
+      backupFile,
+      profileRoot,
+      profileMoves,
+      groups: plans.map((plan) => ({ keeper: plan.id, dropped: plan.dropped.map((row) => row.id), name: plan.name })),
+    };
   }
 
   listByTagIds(tagIds) {

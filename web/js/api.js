@@ -53,6 +53,7 @@ export const api = {
   startLogin: (body = {}) => request('/subjects/login', { method: 'POST', body }),
   loginStatus: (attemptId) => request(`/subjects/login/${attemptId}`),
   refreshLoginQr: (attemptId) => request(`/subjects/login/${attemptId}/refresh`, { method: 'POST', body: {} }),
+  openLoginBrowser: (attemptId) => request(`/subjects/login/${attemptId}/open-browser`, { method: 'POST', body: {} }),
   cancelLogin: (attemptId) => request(`/subjects/login/${attemptId}/cancel`, { method: 'POST', body: {} }),
   checkSubject: (id) => request(`/subjects/${id}/check`, { method: 'POST', body: {} }),
   checkAllSubjects: (body = {}) => request('/subjects/check-all', { method: 'POST', body }),

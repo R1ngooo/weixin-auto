@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -64,6 +65,13 @@ async function waitFor(fn, { timeout = 60_000, interval = 500, label = '条件' 
     await sleep(interval);
   }
   throw new Error(`等待超时（${label}）${lastError ? `：${lastError.message}` : ''}`);
+}
+
+/** 直接操作 smoke 数据库（WAL 允许与运行中的服务并发访问） */
+async function withDb(fn) {
+  const db = new DatabaseSync(path.join(DATA_DIR, 'weixin-auto.sqlite'));
+  db.exec('PRAGMA busy_timeout = 5000');
+  try { return fn(db); } finally { db.close(); }
 }
 
 async function waitJob(jobId, { timeout = 120_000 } = {}) {
@@ -310,6 +318,117 @@ async function main() {
       const byTag = await api(`/subjects?q=${encodeURIComponent('主体-测试2')}`);
       assert(byTag.length === 1, '主体搜索应包含标签名');
       return subject.name;
+    });
+
+    await check('主体显示名称与视频号唯一约束', async () => {
+      await withDb((db) => {
+        db.prepare('UPDATE subjects SET finder_nickname = ?, finder_username = ?, name = ? WHERE id = ?')
+          .run('冒烟视频号', 'smoke_finder_01', '冒烟测试主体', state.subject.id);
+      });
+      const list = await api('/subjects');
+      const subject = list.find((item) => item.id === state.subject.id);
+      assert(subject.displayName === '冒烟视频号', `displayName 应为视频号名称，实际 ${subject.displayName}`);
+      let blocked = false;
+      try {
+        await withDb((db) => {
+          db.prepare('INSERT INTO subjects (id, name, finder_nickname, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+            .run('sub_dup_nick', '重复视频号主体', '冒烟视频号', 'unknown', new Date().toISOString(), new Date().toISOString());
+        });
+      } catch {
+        blocked = true;
+      }
+      assert(blocked, '相同视频号名称应被唯一索引阻止');
+      return `displayName=${subject.displayName}`;
+    });
+
+    await check('主体删除（DB 立即删除 + 登录态备份）', async () => {
+      const subject = await api('/subjects', { method: 'POST', body: { name: '待删除主体' } });
+      const dir = path.join(DATA_DIR, 'profiles', subject.id);
+      await fsp.mkdir(dir, { recursive: true });
+      await fsp.writeFile(path.join(dir, 'marker.txt'), 'profile');
+      const result = await api(`/subjects/${subject.id}`, { method: 'DELETE' });
+      assert(result.removed === true, '删除接口应返回 removed');
+      const list = await api('/subjects');
+      assert(!list.some((item) => item.id === subject.id), '删除后主体不应再出现在列表');
+      const backupDir = path.join(DATA_DIR, 'profiles', '_deleted');
+      const moved = await waitFor(async () => {
+        const entries = await fsp.readdir(backupDir).catch(() => []);
+        return entries.find((name) => name.startsWith(subject.id)) || null;
+      }, { timeout: 8000, interval: 250, label: '登录态备份' });
+      assert(moved, '被删除主体的登录态应备份到 _deleted');
+      return `已删除并备份：${moved}`;
+    });
+
+    await check('重复主体自动合并（视频号名称）', async () => {
+      await withDb((db) => {
+        db.exec('DROP INDEX IF EXISTS idx_subjects_finder_nickname');
+        db.exec('DROP INDEX IF EXISTS idx_subjects_finder_username');
+        const now = new Date().toISOString();
+        db.prepare('INSERT INTO subjects (id, name, finder_nickname, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+          .run('sub_dup_a', '重复视频号A', '重复视频号', 'expired', now, now);
+        db.prepare('INSERT INTO subjects (id, name, finder_nickname, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+          .run('sub_dup_b', '重复视频号B', '重复视频号', 'active', now, now);
+        db.prepare('INSERT OR IGNORE INTO subject_tags (subject_id, tag_id) VALUES (?, ?)').run('sub_dup_a', state.subjectTag);
+        db.prepare('INSERT INTO upload_history (subject_id, action, status, created_at) VALUES (?, ?, ?, ?)').run('sub_dup_a', 'draft', 'success', now);
+      });
+      const result = await api('/subjects/dedupe', { method: 'POST', body: {} });
+      assert(result.mergedGroups >= 1, `应至少合并 1 组重复主体，实际 ${result.mergedGroups}`);
+      const list = await api('/subjects');
+      const merged = list.filter((item) => item.finderNickname === '重复视频号');
+      assert(merged.length === 1, `同名视频号应只剩 1 个主体，实际 ${merged.length}`);
+      assert(merged[0].displayName === '重复视频号', '合并后应显示视频号名称');
+      const history = await withDb((db) => db.prepare('SELECT subject_id FROM upload_history WHERE action = ?').all('draft'));
+      assert(history.some((row) => row.subject_id === merged[0].id), '历史记录应改指向保留主体');
+      const again = await api('/subjects/dedupe', { method: 'POST', body: {} });
+      assert(again.mergedGroups === 0, '再次合并不应重复处理');
+      let blocked = false;
+      try {
+        await withDb((db) => {
+          const now = new Date().toISOString();
+          db.prepare('INSERT INTO subjects (id, name, finder_nickname, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+            .run('sub_dup_c', '重复视频号C', '重复视频号', 'unknown', now, now);
+        });
+      } catch {
+        blocked = true;
+      }
+      assert(blocked, '合并后应重新建立唯一索引');
+      return `合并 ${result.mergedGroups} 组，保留 ${merged[0].displayName}`;
+    });
+
+    await check('扫码登录默认无头且二维码可用', async () => {
+      let attempt;
+      try {
+        attempt = await api('/subjects/login', { method: 'POST', body: { headless: true } });
+      } catch (error) {
+        return `跳过（无法启动登录浏览器：${String(error.message).slice(0, 40)}）`;
+      }
+      try {
+        let snapshot;
+        try {
+          snapshot = await waitFor(async () => {
+            const snap = await api(`/subjects/login/${attempt.attemptId}`);
+            if (snap.qr?.dataUrl) return snap;
+            if (['failed', 'cancelled'].includes(snap.status)) throw new Error(`${snap.status}: ${snap.message}`);
+            return null;
+          }, { timeout: 90_000, interval: 250, label: '登录二维码' });
+        } catch (error) {
+          return `跳过（二维码获取失败：${String(error.message).slice(0, 60)}）`;
+        }
+        assert(snapshot.headless === true, '扫码登录应默认无头模式');
+        assert(snapshot.qrLatencyMs && snapshot.qrLatencyMs < 30_000, `二维码捕获耗时异常：${snapshot.qrLatencyMs}ms`);
+        const capturedAt = snapshot.qr.capturedAt;
+        await api(`/subjects/login/${attempt.attemptId}/refresh`, { method: 'POST', body: {} });
+        const refreshed = await waitFor(async () => {
+          const snap = await api(`/subjects/login/${attempt.attemptId}`);
+          if (snap.qr?.capturedAt && snap.qr.capturedAt !== capturedAt) return snap;
+          if (['failed', 'cancelled'].includes(snap.status)) throw new Error(`${snap.status}: ${snap.message}`);
+          return null;
+        }, { timeout: 60_000, interval: 250, label: '二维码刷新' });
+        assert(refreshed.refreshLatencyMs && refreshed.refreshLatencyMs < 30_000, `二维码刷新耗时异常：${refreshed.refreshLatencyMs}ms`);
+        return `二维码 ${snapshot.qrLatencyMs}ms，刷新 ${refreshed.refreshLatencyMs}ms，headless=${snapshot.headless}`;
+      } finally {
+        await api(`/subjects/login/${attempt.attemptId}/cancel`, { method: 'POST', body: {} }).catch(() => undefined);
+      }
     });
 
     await check('发布配置创建与预览', async () => {

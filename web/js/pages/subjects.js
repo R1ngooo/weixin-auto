@@ -80,32 +80,34 @@ export const subjectsPage = {
 
     function subjectCard(subject) {
       const checked = state.selected.has(subject.id);
+      const displayName = subject.displayName || subject.finderNickname || subject.finderUsername || subject.name || '未命名主体';
+      const subParts = [];
+      if (subject.wechatNickname || subject.wechatId) subParts.push(`微信：${subject.wechatNickname || subject.wechatId}`);
+      if (subject.finderUsername) subParts.push(`视频号ID：${subject.finderUsername}`);
+      const subline = subParts.join(' · ') || '未识别账号信息';
       return `
         <div class="subject-card ${state.batchMode ? 'selectable' : ''} ${checked ? 'selected' : ''}" data-subject="${esc(subject.id)}">
-          ${state.batchMode ? `<label class="select-box check" title="选择"><input type="checkbox" data-select="${esc(subject.id)}" ${checked ? 'checked' : ''}></label>` : ''}
           <div class="subject-head">
+            ${state.batchMode ? `<label class="select-box check" title="选择"><input type="checkbox" data-select="${esc(subject.id)}" ${checked ? 'checked' : ''}></label>` : ''}
             ${subject.avatarUrl
               ? `<img class="avatar" src="${esc(subject.avatarUrl)}" alt="" referrerpolicy="no-referrer">`
-              : `<div class="avatar">${esc((subject.name || '主')[0])}</div>`}
-            <div style="min-width:0;flex:1">
-              <div class="row between">
-                <div class="subject-name truncate">${esc(subject.name)}</div>
-                ${statusBadge(subject.status, SUBJECT_STATUS)}
-              </div>
-              <div class="subject-meta">
-                <span>微信：${esc(subject.wechatNickname || subject.wechatId || '未识别')}</span>
-                <span>视频号：${esc(subject.finderNickname || subject.finderUsername || '未识别')}</span>
-              </div>
+              : `<div class="avatar">${esc((displayName || '主')[0])}</div>`}
+            <div class="subject-identity">
+              <div class="subject-name truncate" title="${esc(displayName)}">${esc(displayName)}</div>
+              <div class="subject-sub truncate" title="${esc(subline)}">${esc(subline)}</div>
             </div>
+            <span class="subject-status">${statusBadge(subject.status, SUBJECT_STATUS)}</span>
           </div>
-          ${subject.tags.length ? `<div class="filter-tags">${tagChips(subject.tags)}</div>` : ''}
-          ${subject.note ? `<div class="subject-note">${esc(subject.note)}</div>` : ''}
-          <div class="small muted-2">
-            最近检查：${esc(subject.lastCheckAt ? `${timeAgo(subject.lastCheckAt)}（${fmtDate(subject.lastCheckAt)}）` : '未检查')}
-            ${subject.lastLoginAt ? ` · 登录于 ${esc(fmtDate(subject.lastLoginAt))}` : ''}
+          <div class="subject-body">
+            <div class="subject-tags">${subject.tags.length ? tagChips(subject.tags) : '<span class="muted-2">未打标签</span>'}</div>
+            <div class="subject-note-row">${subject.note ? `备注：${esc(subject.note)}` : '<span class="muted-2">无备注</span>'}</div>
+            <div class="subject-meta-row">
+              最近检查：${esc(subject.lastCheckAt ? `${timeAgo(subject.lastCheckAt)}（${fmtDate(subject.lastCheckAt)}）` : '未检查')}
+              ${subject.lastLoginAt ? ` · 登录于 ${esc(fmtDate(subject.lastLoginAt))}` : ''}
+            </div>
+            <div class="subject-detail-row">${subject.statusDetail ? esc(subject.statusDetail) : ''}</div>
           </div>
-          ${subject.statusDetail ? `<div class="small" style="color:var(--yellow)">${esc(subject.statusDetail)}</div>` : ''}
-          <div class="actions">
+          <div class="actions subject-actions">
             <button class="btn small ${subject.status === 'expired' ? 'primary' : ''}" data-card-act="login">重新扫码</button>
             <button class="btn small" data-card-act="check">检查会话</button>
             <button class="btn small ghost" data-card-act="open">打开浏览器</button>
@@ -199,31 +201,55 @@ export const subjectsPage = {
       if (state.loginPolling) clearInterval(state.loginPolling);
       const target = subjectId ? state.subjects.find((item) => item.id === subjectId) : null;
       const dialog = modal({
-        title: target ? `重新扫码登录：${target.name}` : '扫码登录新主体',
+        title: target ? `重新扫码登录：${target.displayName || target.name}` : '扫码登录新主体',
         body: `
           <div class="qr-box">
-            <div id="qr-image" style="width:240px;height:240px;display:grid;place-items:center;background:var(--bg-soft);border-radius:12px;border:1px solid var(--border)">
-              <div class="col" style="align-items:center;gap:10px"><span class="spinner"></span><span class="small muted">正在打开登录页面…</span></div>
+            <div id="qr-image" class="qr-image-box">
+              <div class="col" style="align-items:center;gap:10px"><span class="spinner"></span><span class="small muted">正在启动无头浏览器…</span></div>
             </div>
-            <div class="qr-status" id="qr-status"><span class="spinner"></span><span>正在打开浏览器并加载二维码，首次可能需要十几秒…</span></div>
-            <div class="small muted-2" style="text-align:center;max-width:380px">请使用手机微信扫码并确认登录。若页面出现「使用其他头像、昵称或账号」会自动切换为扫码；二维码过期会尝试自动刷新。</div>
+            <div class="qr-status" id="qr-status"><span class="spinner"></span><span>正在后台打开登录页面并加载二维码…</span></div>
+            <div class="small muted-2" style="text-align:center;max-width:400px">默认以<b>无头模式</b>后台运行，不显示浏览器窗口；二维码过期会自动快速刷新。如需在浏览器中手动操作，可点击下方「浏览器扫码」。</div>
           </div>
           <div id="qr-extra"></div>
         `,
         footer: `
           <button class="btn" data-act="refresh">刷新二维码</button>
+          <button class="btn ghost" data-act="browser">浏览器扫码</button>
           <button class="btn danger" data-act="cancel">取消</button>
         `,
       });
       const imageBox = dialog.body.querySelector('#qr-image');
       const statusBox = dialog.body.querySelector('#qr-status');
       const extraBox = dialog.body.querySelector('#qr-extra');
+      const refreshBtn = dialog.foot.querySelector('[data-act="refresh"]');
+      const browserBtn = dialog.foot.querySelector('[data-act="browser"]');
+      const cancelBtn = dialog.foot.querySelector('[data-act="cancel"]');
       let attemptId = null;
       let finished = false;
+      let lastQrAt = 0;
+      let refreshing = false;
+      let openingBrowser = false;
 
       const stop = () => {
         if (state.loginPolling) clearInterval(state.loginPolling);
         state.loginPolling = null;
+      };
+
+      const updateButtons = (snapshot) => {
+        const terminal = finished || ['success', 'failed', 'cancelled'].includes(snapshot?.status);
+        const blocked = terminal || ['scanned', 'choose-finder', 'opening-browser'].includes(snapshot?.status);
+        refreshBtn.disabled = Boolean(blocked || refreshing);
+        browserBtn.disabled = Boolean(blocked || openingBrowser);
+        refreshBtn.textContent = refreshing ? '刷新中…' : '刷新二维码';
+        browserBtn.textContent = openingBrowser ? '打开中…' : '浏览器扫码';
+      };
+
+      const renderQr = (snapshot) => {
+        if (!snapshot.qr?.dataUrl) return;
+        if (snapshot.qr.capturedAt === lastQrAt) return;
+        lastQrAt = snapshot.qr.capturedAt;
+        imageBox.innerHTML = `<img src="${snapshot.qr.dataUrl}" alt="登录二维码" style="width:100%;height:100%;object-fit:contain;border-radius:10px">`;
+        imageBox.classList.remove('refreshing');
       };
 
       const handle = async (snapshot) => {
@@ -231,6 +257,7 @@ export const subjectsPage = {
           finished = true;
           stop();
           statusBox.innerHTML = '<span style="color:var(--green)">✓ 登录成功</span>';
+          updateButtons(snapshot);
           toast(snapshot.message || '登录成功', 'success');
           setTimeout(async () => {
             dialog.close();
@@ -242,19 +269,31 @@ export const subjectsPage = {
           finished = true;
           stop();
           statusBox.innerHTML = `<span style="color:var(--red)">${esc(snapshot.message || '登录失败')}</span>`;
+          imageBox.classList.remove('refreshing');
           extraBox.innerHTML = `<div class="row" style="justify-content:center;margin-top:8px"><button class="btn small" data-act="retry">重新生成二维码</button></div>`;
           extraBox.querySelector('[data-act="retry"]')?.addEventListener('click', () => start());
+          updateButtons(snapshot);
           return;
         }
-        if (snapshot.qr?.dataUrl) {
-          imageBox.innerHTML = `<img src="${snapshot.qr.dataUrl}" alt="登录二维码" style="width:100%;height:100%;object-fit:contain;border-radius:10px">`;
-        }
+        const busyStatus = snapshot.status === 'refreshing' || snapshot.status === 'opening-browser';
+        if (busyStatus) imageBox.classList.add('refreshing');
+        renderQr(snapshot);
         const icon = snapshot.status === 'scanned' ? '📱' : snapshot.status === 'choose-finder' ? '🧭' : null;
-        statusBox.innerHTML = `${icon ? `<span>${icon}</span>` : '<span class="spinner"></span>'}<span>${esc(snapshot.message || '')}</span>`;
+        if (busyStatus || !icon) {
+          statusBox.innerHTML = `<span class="spinner"></span><span>${esc(snapshot.message || '')}</span>`;
+        } else {
+          statusBox.innerHTML = `<span>${icon}</span><span>${esc(snapshot.message || '')}</span>`;
+        }
+        const timing = [];
+        if (snapshot.qrLatencyMs) timing.push(`二维码 ${snapshot.qrLatencyMs}ms`);
+        if (snapshot.refreshLatencyMs) timing.push(`刷新 ${snapshot.refreshLatencyMs}ms`);
+        const timingText = timing.length ? `<span class="small muted-2">（${timing.join(' · ')}）</span>` : '';
+        statusBox.innerHTML += timingText;
         if (snapshot.logs?.length) {
           extraBox.innerHTML = `<details class="mt-8"><summary>查看登录日志（${snapshot.logs.length} 条）</summary>
             <div class="log-list mt-8">${snapshot.logs.slice(-12).map((line) => `<div class="log-line"><span>${esc(line)}</span></div>`).join('')}</div></details>`;
         }
+        updateButtons(snapshot);
       };
 
       const poll = async () => {
@@ -269,32 +308,64 @@ export const subjectsPage = {
 
       const start = async () => {
         finished = false;
-        imageBox.innerHTML = '<div class="col" style="align-items:center;gap:10px"><span class="spinner"></span><span class="small muted">正在打开登录页面…</span></div>';
-        statusBox.innerHTML = '<span class="spinner"></span><span>正在打开浏览器并加载二维码…</span>';
+        lastQrAt = 0;
+        refreshing = false;
+        openingBrowser = false;
+        imageBox.classList.remove('refreshing');
+        imageBox.innerHTML = '<div class="col" style="align-items:center;gap:10px"><span class="spinner"></span><span class="small muted">正在启动无头浏览器…</span></div>';
+        statusBox.innerHTML = '<span class="spinner"></span><span>正在后台打开登录页面并加载二维码…</span>';
         extraBox.innerHTML = '';
+        updateButtons(null);
         try {
-          const attempt = await api.startLogin(subjectId ? { subjectId } : {});
+          // 扫码登录默认无头执行（不弹出浏览器窗口）；仅「浏览器扫码」兜底才显示浏览器
+          const attempt = await api.startLogin(subjectId ? { subjectId, headless: true } : { headless: true });
           attemptId = attempt.attemptId;
           await handle(attempt);
           stop();
-          state.loginPolling = setInterval(poll, 1200);
+          state.loginPolling = setInterval(poll, 500);
         } catch (error) {
           finished = true;
           stop();
           statusBox.innerHTML = `<span style="color:var(--red)">${esc(error.message)}</span>`;
+          updateButtons({ status: 'failed' });
         }
       };
 
-      dialog.foot.querySelector('[data-act="refresh"]').addEventListener('click', async () => {
-        if (!attemptId) return;
+      refreshBtn.addEventListener('click', async () => {
+        if (!attemptId || refreshing) return;
+        refreshing = true;
+        updateButtons(null);
+        statusBox.innerHTML = '<span class="spinner"></span><span>正在刷新二维码…</span>';
+        imageBox.classList.add('refreshing');
         try {
           await api.refreshLoginQr(attemptId);
-          toast('已请求刷新二维码，请稍候', 'info');
+          toast('正在刷新二维码，请稍候', 'info');
         } catch (error) {
           toast(error.message, 'error');
+        } finally {
+          setTimeout(() => {
+            refreshing = false;
+            updateButtons(null);
+          }, 3500);
         }
       });
-      dialog.foot.querySelector('[data-act="cancel"]').addEventListener('click', async () => {
+      browserBtn.addEventListener('click', async () => {
+        if (!attemptId || openingBrowser) return;
+        openingBrowser = true;
+        updateButtons(null);
+        statusBox.innerHTML = '<span class="spinner"></span><span>正在打开浏览器窗口…</span>';
+        try {
+          const snapshot = await api.openLoginBrowser(attemptId);
+          await handle(snapshot);
+          toast('已打开浏览器窗口，请用手机微信扫码（也可继续使用面板二维码）', 'success', 5000);
+        } catch (error) {
+          toast(`打开浏览器失败：${error.message}`, 'error', 6000);
+        } finally {
+          openingBrowser = false;
+          updateButtons(null);
+        }
+      });
+      cancelBtn.addEventListener('click', async () => {
         finished = true;
         stop();
         dialog.close();
@@ -317,7 +388,7 @@ export const subjectsPage = {
         title: '编辑主体',
         body: `
           <div class="col">
-            <label class="field"><span>显示名称</span><input type="text" data-name value="${esc(subject.name)}" maxlength="40"></label>
+            <label class="field"><span>显示名称（兜底：有视频号名称时优先显示视频号名称）</span><input type="text" data-name value="${esc(subject.name)}" maxlength="40"></label>
             <label class="field"><span>备注</span><input type="text" data-note value="${esc(subject.note)}" maxlength="120"></label>
             <div class="field"><span>标签</span><div class="chip-select" data-tags></div></div>
             <div class="kv small muted">
@@ -347,19 +418,27 @@ export const subjectsPage = {
     }
 
     async function removeSubject(subject) {
+      const displayName = subject.displayName || subject.name;
       const ok = await confirmDialog({
         title: '删除主体',
-        message: `确定删除主体「${subject.name}」吗？\n\n将同时删除该主体的浏览器登录态目录（需要重新扫码才能恢复），已产生的执行记录会保留。`,
+        message: `确定删除主体「${displayName}」吗？\n\n删除后卡片会立即消失；执行记录保留。浏览器登录态目录会备份到 data/profiles/_deleted（不直接丢失）。`,
         okText: '删除',
         danger: true,
       });
       if (!ok) return;
+      // 先乐观移除卡片，避免接口/浏览器清理慢造成「点了没反应」的错觉
+      const snapshotList = [...state.subjects];
+      state.subjects = state.subjects.filter((item) => item.id !== subject.id);
+      state.selected.delete(subject.id);
+      render(state.tagsCache || []);
       try {
         await api.deleteSubject(subject.id);
-        toast('已删除', 'success');
+        toast('已删除主体（登录态目录已备份）', 'success');
         await load();
       } catch (error) {
-        toast(error.message, 'error');
+        state.subjects = snapshotList;
+        render(state.tagsCache || []);
+        toast(`删除失败：${error.message}`, 'error', 6000);
       }
     }
 

@@ -294,7 +294,7 @@ export const configsPage = {
               <div data-subject-ids style="display:${cfg.subjectSelection.mode === 'tags' ? 'none' : 'block'}">
                 ${subjects.length ? `<div class="chip-select" style="max-height:180px">${subjects.map((subject) => `
                   <label class="check" style="min-width:180px"><input type="checkbox" data-subject-check value="${esc(subject.id)}" ${cfg.subjectSelection.ids.includes(subject.id) ? 'checked' : ''}>
-                    <span>${esc(subject.name)}</span>${subject.status === 'expired' ? badge('过期', 'red') : ''}
+                    <span>${esc(subject.displayName || subject.name)}</span>${subject.status === 'expired' ? badge('过期', 'red') : ''}
                   </label>`).join('')}</div>` : '<div class="small muted-2">还没有主体，请先在「主体管理」扫码登录</div>'}
               </div>
               <div data-subject-tags style="display:${cfg.subjectSelection.mode === 'tags' ? 'block' : 'none'}">

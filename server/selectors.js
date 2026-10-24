@@ -11,6 +11,8 @@ export const DEFAULT_SELECTORS = {
     qrImage: 'img.js_qrcode_img, img.web_qrcode_img, img[src*="connect/qrcode"]',
     qrContainer: '.qrcode, .web_qrcode, .qrcode_img, .login_qrcode',
     refresh: '.js_web_qrcode_reload',
+    // 刷新按钮在 channels 登录主页（不在 qrconnect iframe 内），供快速刷新使用
+    refreshPageSelectors: ['.js_web_qrcode_reload', '.js_qrcode_reload', '[class*="qrcode"] [class*="reload"]', 'text=刷新二维码'],
     quickLoginSwitchTexts: ['使用其他头像、昵称或账号', '使用其它头像、昵称或账号', '切换账号'],
     quickLoginAvatar: '.js_quick_login_avatar, .qlogin_user_avatar',
     expiredTexts: ['二维码已过期', '二维码失效', '二维码已失效', '二维码过期', '已过期'],

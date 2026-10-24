@@ -10,7 +10,13 @@ function snapshot(attempt) {
     status: attempt.status,
     message: attempt.message || '',
     qrExpired: Boolean(attempt.qrExpired),
+    refreshing: Boolean(attempt.refreshing),
+    headless: attempt.headless !== false,
+    browserOpen: Boolean(attempt.browserOpen),
     qr: attempt.qr ? { dataUrl: attempt.qr.dataUrl, capturedAt: attempt.qr.capturedAt } : null,
+    qrLatencyMs: attempt.qrLatencyMs || null,
+    refreshLatencyMs: attempt.refreshLatencyMs || null,
+    refreshCount: attempt.refreshCount || 0,
     identity: attempt.identity || null,
     logs: attempt.logs.slice(-80),
     startedAt: attempt.startedAt,
@@ -24,7 +30,6 @@ export function createLoginManager({ browser, subjects, getSettings, getSelector
   const attempts = new Map();
   let lastPrune = 0;
 
-  const timing = () => getSettings()?.timing || {};
   const selectors = () => getSelectors();
 
   function prune() {
@@ -48,7 +53,7 @@ export function createLoginManager({ browser, subjects, getSettings, getSelector
     return null;
   }
 
-  async function start({ subjectId = null, name = null, newSubject = false } = {}) {
+  async function start({ subjectId = null, name = null, newSubject = false, headless = true } = {}) {
     prune();
     let subject;
     let autoCreated = false;
@@ -79,6 +84,13 @@ export function createLoginManager({ browser, subjects, getSettings, getSelector
       refreshCount: 0,
       quickSwitched: false,
       page: null,
+      // 扫码登录默认无头执行；用户点「浏览器扫码」兜底后才切换为有头
+      headless: headless !== false,
+      browserOpen: false,
+      switching: false,
+      refreshing: false,
+      qrLatencyMs: null,
+      refreshLatencyMs: null,
     };
     attempts.set(attempt.id, attempt);
     attempt.task = run(attempt, subject).catch(async (error) => {
@@ -146,12 +158,12 @@ export function createLoginManager({ browser, subjects, getSettings, getSelector
     await browser.close(attempt.subjectId).catch(() => undefined);
   }
 
-  async function waitForQrFrame(page, timeoutMs) {
+  async function waitForQrFrame(page, timeoutMs, pollMs = 150) {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       const frame = page.frames().find((f) => String(f.url()).includes('open.weixin.qq.com/connect/qrconnect'));
       if (frame) return frame;
-      await sleep(250);
+      await sleep(pollMs);
     }
     return null;
   }
@@ -165,7 +177,7 @@ export function createLoginManager({ browser, subjects, getSettings, getSelector
           log(attempt, `检测到快捷登录入口，点击「${text}」`);
           await locator.click({ timeout: 5000 });
           attempt.quickSwitched = true;
-          await sleep(800);
+          await sleep(250);
           return true;
         }
       } catch { /* 继续尝试 */ }
@@ -173,73 +185,133 @@ export function createLoginManager({ browser, subjects, getSettings, getSelector
     return false;
   }
 
-  async function captureQr(attempt) {
+  /**
+   * 快速捕获二维码：先在 iframe 中轮询图片地址；刷新场景下等待 src 变化，避免返回旧码。
+   */
+  async function captureQr(attempt, { waitForNewSrc = false, timeoutMs = 6000 } = {}) {
+    const startedAt = Date.now();
     const page = attempt.page;
+    if (!page || page.isClosed()) throw new Error('登录页面已关闭');
     const sel = selectors().login;
-    const frame = await waitForQrFrame(page, 25_000);
+    let frame = await waitForQrFrame(page, 15_000, 150);
+    if (!frame) {
+      // 页面可能停留在快捷登录界面，重新加载一次登录页再尝试
+      await page.reload({ waitUntil: 'domcontentloaded', timeout: 20_000 }).catch(() => undefined);
+      frame = await waitForQrFrame(page, 10_000, 150);
+    }
     if (!frame) throw new Error('页面中未找到微信登录二维码框架，可能是网络异常，请点击「刷新二维码」重试');
-    if (!attempt.quickSwitched) await switchToQrLogin(attempt, frame);
+    if (!attempt.quickSwitched) {
+      const switched = await switchToQrLogin(attempt, frame);
+      if (switched) frame = await waitForQrFrame(page, 5000, 150) || frame;
+    }
 
     const img = frame.locator(sel.qrImage).first();
-    await img.waitFor({ state: 'visible', timeout: 20_000 }).catch(() => undefined);
-    const src = await img.getAttribute('src').catch(() => null);
+    await img.waitFor({ state: 'visible', timeout: 3000 }).catch(() => undefined);
+    const previousSrc = attempt.qr?.src || null;
+    let src = null;
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      src = await img.getAttribute('src').catch(() => null);
+      if (src && (!waitForNewSrc || src !== previousSrc)) break;
+      await sleep(150);
+    }
+    if (!src) throw new Error('未能获取二维码图片');
+
     let dataUrl = null;
-    if (src) {
-      const absolute = /^https?:/i.test(src) ? src : new URL(src, frame.url()).toString();
-      try {
-        const response = await page.context().request.get(absolute, { timeout: 15_000 });
-        if (response.ok()) {
-          const buffer = await response.body();
-          const type = response.headers()['content-type'] || 'image/png';
-          dataUrl = `data:${type};base64,${buffer.toString('base64')}`;
-        }
-      } catch { /* 回退到元素截图 */ }
-      if (!dataUrl) {
-        try {
-          const buffer = await img.screenshot({ timeout: 8000 });
-          dataUrl = `data:image/png;base64,${buffer.toString('base64')}`;
-        } catch { /* ignore */ }
+    const absolute = /^https?:/i.test(src) ? src : new URL(src, frame.url()).toString();
+    try {
+      const response = await page.context().request.get(absolute, { timeout: 8000 });
+      if (response.ok()) {
+        const buffer = await response.body();
+        const type = response.headers()['content-type'] || 'image/png';
+        dataUrl = `data:${type};base64,${buffer.toString('base64')}`;
       }
+    } catch { /* 回退到元素截图 */ }
+    if (!dataUrl) {
+      try {
+        const buffer = await img.screenshot({ timeout: 5000 });
+        dataUrl = `data:image/png;base64,${buffer.toString('base64')}`;
+      } catch { /* ignore */ }
     }
     if (!dataUrl) {
-      // 整体截图作为兜底
-      const buffer = await page.screenshot({ timeout: 8000 }).catch(() => null);
+      const buffer = await page.screenshot({ timeout: 5000 }).catch(() => null);
       if (buffer) dataUrl = `data:image/png;base64,${buffer.toString('base64')}`;
     }
     if (!dataUrl) throw new Error('未能获取二维码图片');
-    attempt.qr = { dataUrl, src: src || null, capturedAt: Date.now() };
+    attempt.qr = { dataUrl, src, capturedAt: Date.now() };
     attempt.qrExpired = false;
-    log(attempt, '已获取登录二维码');
+    attempt.qrLatencyMs = Date.now() - startedAt;
+    log(attempt, `已获取登录二维码（${attempt.qrLatencyMs}ms）`);
     return true;
   }
 
   async function doRefresh(attempt) {
-    const page = attempt.page;
-    if (!page) return;
+    if (attempt.refreshing) return;
+    if (TERMINAL.has(attempt.status)) return;
+    if (attempt.status === 'scanned' || attempt.status === 'choose-finder') return;
+    attempt.refreshing = true;
     attempt.refreshCount += 1;
+    const startedAt = Date.now();
+    attempt.status = 'refreshing';
+    attempt.message = '正在刷新二维码…';
     log(attempt, '刷新二维码');
     try {
-      const frame = await waitForQrFrame(page, 5000);
-      const sel = selectors().login;
-      if (frame) {
-        for (const choice of sel.refresh.split(',').map((s) => s.trim())) {
-          const locator = frame.locator(choice).first();
+      const page = attempt.page;
+      if (!page || page.isClosed()) throw new Error('登录页面已关闭');
+      // 先尝试点击登录页上的刷新按钮（旧逻辑错误地在 iframe 内找选择器，这里改为主页）
+      let clicked = false;
+      for (const choice of selectors().login.refreshPageSelectors || []) {
+        try {
+          const locator = page.locator(choice).first();
           if (await locator.count() > 0 && await locator.isVisible().catch(() => false)) {
-            await locator.click({ timeout: 4000 }).catch(() => undefined);
+            await locator.click({ timeout: 3000 });
+            clicked = true;
             break;
           }
-        }
-      } else {
-        await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => undefined);
+        } catch { /* 继续尝试 */ }
       }
-      await sleep(1200);
+      if (clicked) {
+        const ok = await captureQr(attempt, { waitForNewSrc: true, timeoutMs: 8000 }).then(() => true).catch(() => false);
+        if (ok) {
+          attempt.status = 'qr';
+          attempt.message = '请使用手机微信扫码登录';
+          return;
+        }
+      }
+      // 刷新按钮无效/不存在：直接重新加载登录页，最快获得新二维码
+      await page.reload({ waitUntil: 'domcontentloaded', timeout: 20_000 }).catch(async () => {
+        await page.goto(selectors().login.url, { waitUntil: 'domcontentloaded', timeout: 20_000 });
+      });
       attempt.quickSwitched = false;
-      await captureQr(attempt);
+      await captureQr(attempt, { waitForNewSrc: true, timeoutMs: 12_000 });
       attempt.status = 'qr';
       attempt.message = '请使用手机微信扫码登录';
     } catch (error) {
       log(attempt, `刷新二维码失败：${error?.message || error}`);
+      attempt.message = `二维码刷新失败：${error?.message || error}，请点击「刷新二维码」重试`;
+    } finally {
+      attempt.refreshLatencyMs = Date.now() - startedAt;
+      attempt.refreshing = false;
+      if (attempt.status === 'refreshing') {
+        attempt.status = attempt.qr ? 'qr' : 'starting';
+      }
+      log(attempt, `二维码刷新完成（${attempt.refreshLatencyMs}ms）`);
     }
+  }
+
+  /** 绑定当前尝试使用的页面（登录弹窗默认无头；兜底打开浏览器后会换页） */
+  function attachPage(attempt, page) {
+    attempt.page = page;
+    page.on('close', () => {
+      if (attempt.switching) return;
+      if (attempt.page !== page) return;
+      if (!TERMINAL.has(attempt.status)) {
+        attempt.status = 'cancelled';
+        attempt.message = '登录窗口已关闭';
+        attempt.finishedAt = Date.now();
+        log(attempt, '登录窗口已关闭');
+      }
+    });
   }
 
   async function probeLoggedIn(page) {
@@ -327,18 +399,11 @@ export function createLoginManager({ browser, subjects, getSettings, getSelector
   }
 
   async function run(attempt, subject) {
-    const page = await browser.getPage(attempt.subjectId);
-    attempt.page = page;
-    page.on('close', () => {
-      if (!TERMINAL.has(attempt.status)) {
-        attempt.status = 'cancelled';
-        attempt.message = '登录窗口已关闭';
-      }
-    });
+    const page = await browser.getPage(attempt.subjectId, { headless: attempt.headless });
+    attachPage(attempt, page);
     const loginUrl = selectors().login.url;
-    log(attempt, `打开登录页：${loginUrl}`);
+    log(attempt, `打开登录页：${loginUrl}（${attempt.headless ? '无头模式' : '有头模式'}）`);
     await page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: 60_000 });
-    await sleep(1000 + Number(timing().stepDelayMs || 0));
     // 页面本身也可能已经有登录态，直接进入平台
     if (isPlatformUrl(page.url())) {
       await finishSuccess(attempt, subject, page);
@@ -352,12 +417,24 @@ export function createLoginManager({ browser, subjects, getSettings, getSelector
     let scannedNotified = false;
     while (Date.now() < deadline) {
       if (attempt.controller.signal.aborted) break;
-      await sleep(1200);
+      await sleep(500);
+      if (attempt.switching) continue; // 正在切换无头/有头，暂停检查
       if (attempt.refreshRequested) {
         attempt.refreshRequested = false;
         await doRefresh(attempt);
         continue;
       }
+      const page = attempt.page;
+      if (!page || page.isClosed()) {
+        // 兜底：页面被关闭时结束尝试（attachPage 已处理状态）
+        if (!TERMINAL.has(attempt.status)) {
+          attempt.status = 'cancelled';
+          attempt.message = '登录页面已关闭';
+          attempt.finishedAt = Date.now();
+        }
+        break;
+      }
+
       let frameText = '';
       try {
         const frame = page.frames().find((f) => String(f.url()).includes('open.weixin.qq.com/connect/qrconnect'));
@@ -371,7 +448,7 @@ export function createLoginManager({ browser, subjects, getSettings, getSelector
           attempt.message = '二维码已过期，正在自动刷新…';
           log(attempt, '二维码已过期');
         }
-        if (attempt.refreshCount < 6) await doRefresh(attempt);
+        if (!attempt.refreshing) await doRefresh(attempt);
         continue;
       }
       if (frameText && loginSel.scannedTexts.some((text) => frameText.includes(text))) {
@@ -424,6 +501,73 @@ export function createLoginManager({ browser, subjects, getSettings, getSelector
     await cleanupOnFailure(attempt, subject).catch(() => undefined);
   }
 
+  /** 兜底：把当前无头登录会话切换为有头浏览器并打开原登录页（同一 profile 目录） */
+  async function openBrowser(attemptId) {
+    const attempt = attempts.get(attemptId);
+    if (!attempt) throw new Error('登录会话不存在或已结束');
+    if (TERMINAL.has(attempt.status)) throw new Error('登录会话已结束，请重新发起扫码登录');
+    if (attempt.status === 'scanned' || attempt.status === 'choose-finder') {
+      throw new Error('已扫码确认，无法切换浏览器模式；请继续在手机上完成确认');
+    }
+    if (!attempt.headless) {
+      try { await attempt.page?.bringToFront?.(); } catch { /* ignore */ }
+      attempt.browserOpen = true;
+      attempt.message = '已打开浏览器，请使用手机微信扫码或在浏览器中操作';
+      return snapshot(attempt);
+    }
+    attempt.switching = true;
+    attempt.status = 'opening-browser';
+    attempt.message = '正在打开浏览器…';
+    try {
+      await browser.close(attempt.subjectId).catch(() => undefined);
+      const page = await browser.getPage(attempt.subjectId, { headless: false });
+      attempt.headless = false;
+      attempt.browserOpen = true;
+      attempt.quickSwitched = false;
+      attempt.qr = null;
+      attachPage(attempt, page);
+      log(attempt, '已切换到有头浏览器，打开原登录页面');
+      await page.goto(selectors().login.url, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+      await sleep(300);
+      await captureQr(attempt).catch((error) => log(attempt, `有头模式二维码捕获失败：${error?.message || error}`));
+      attempt.status = attempt.qr ? 'qr' : 'starting';
+      attempt.message = '已打开浏览器，请使用手机微信扫码（也可使用面板二维码）';
+    } catch (error) {
+      // 兜底失败：回滚为无头模式继续面板二维码
+      attempt.headless = true;
+      attempt.browserOpen = false;
+      try {
+        const page = await browser.getPage(attempt.subjectId, { headless: true });
+        attachPage(attempt, page);
+        await page.goto(selectors().login.url, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+        await captureQr(attempt).catch(() => undefined);
+        attempt.status = attempt.qr ? 'qr' : 'starting';
+        attempt.message = '无法打开浏览器窗口，已回退为面板二维码';
+      } catch { /* ignore */ }
+      throw new Error(`无法打开浏览器窗口：${String(error?.message || error)}。可继续使用面板二维码`);
+    } finally {
+      attempt.switching = false;
+    }
+    return snapshot(attempt);
+  }
+
+  /** 主体被删除时取消其进行中的登录尝试 */
+  function cancelForSubject(subjectId) {
+    let cancelled = 0;
+    for (const attempt of attempts.values()) {
+      if (attempt.subjectId !== subjectId || TERMINAL.has(attempt.status)) continue;
+      attempt.controller.abort();
+      attempt.status = 'cancelled';
+      attempt.message = '主体已删除，登录已取消';
+      attempt.finishedAt = Date.now();
+      cancelled += 1;
+      Promise.resolve(attempt.task).catch(() => undefined).finally(() => {
+        cleanupPlaceholder(attempt).catch(() => undefined);
+      });
+    }
+    return cancelled;
+  }
+
   async function finishSuccess(attempt, subject, page) {
     attempt.message = '登录成功，正在读取账号信息…';
     log(attempt, '登录成功，读取视频号/微信账号信息');
@@ -458,7 +602,8 @@ export function createLoginManager({ browser, subjects, getSettings, getSelector
 
     let finalSubjectId = subject.id;
     try {
-      const existing = identityPayload.identityKey ? subjects.findByIdentity(identityPayload.identityKey) : null;
+      // 按「视频号ID → 微信身份 → 视频号名称 → 微信ID」查重，命中则合并到已有主体，保证卡片唯一
+      const existing = subjects.findDuplicate(identityPayload, subject.id);
       if (existing && existing.id !== subject.id) {
         log(attempt, `识别到已存在主体「${existing.name}」，合并登录状态`);
         await browser.close(subject.id).catch(() => undefined);
@@ -501,5 +646,5 @@ export function createLoginManager({ browser, subjects, getSettings, getSelector
     }
   }
 
-  return { start, get, requestRefresh, cancel, activeCount, closeAll, _attempts: attempts };
+  return { start, get, requestRefresh, cancel, openBrowser, cancelForSubject, activeCount, closeAll, _attempts: attempts };
 }

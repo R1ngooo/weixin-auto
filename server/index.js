@@ -31,6 +31,23 @@ async function main() {
   const settings = getSettings();
 
   const subjects = new SubjectService();
+  // 启动时合并重复主体（按视频号名称/ID/identityKey），并归一显示名称、建立唯一索引
+  try {
+    const dedupe = await subjects.mergeDuplicates();
+    const normalized = subjects.normalizeNames();
+    const repaired = subjects.repairSubjectReferences();
+    const indexes = subjects.ensureUniqueIndexes();
+    if (dedupe.mergedGroups > 0) {
+      console.log(`  已合并重复主体 ${dedupe.mergedGroups} 组（备份：${dedupe.backupFile || '无'}，profile：${dedupe.profileRoot || '无'}）`);
+    }
+    if (normalized > 0) console.log(`  已按视频号名称归一主体显示名称 ${normalized} 个`);
+    if (repaired.fixed > 0) console.log(`  已修复 ${repaired.fixed} 处发布配置/任务中的主体引用（清理无效引用 ${repaired.removed} 个）`);
+    for (const [name, result] of Object.entries(indexes)) {
+      if (result !== true) console.warn(`  [subjects] 唯一索引 ${name} 创建失败：${result}`);
+    }
+  } catch (error) {
+    console.error('[subjects] 启动重复主体合并失败：', String(error?.message || error));
+  }
   const tags = new TagService();
   const videos = new VideoService({ jobs });
   const texts = new TextService();

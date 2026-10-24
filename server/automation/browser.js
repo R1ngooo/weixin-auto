@@ -28,10 +28,11 @@ export function createBrowserManager({ getSettings, getSubject }) {
     return path.join(PATHS.profiles, subjectId);
   }
 
-  function launchOptions() {
+  function launchOptions(headlessOverride) {
     const browser = getSettings()?.browser || {};
+    const headless = headlessOverride === undefined ? browser.headless === true : Boolean(headlessOverride);
     const options = {
-      headless: browser.headless === true,
+      headless,
       viewport: browser.viewport || { width: 1440, height: 900 },
       locale: browser.locale || 'zh-CN',
       slowMo: Number(browser.slowMoMs || 0),
@@ -53,16 +54,16 @@ export function createBrowserManager({ getSettings, getSubject }) {
     return options;
   }
 
-  async function launch(subjectId) {
+  async function launch(subjectId, { headless } = {}) {
     const dir = profileDir(subjectId);
     await ensureDir(dir);
-    const options = launchOptions();
+    const options = launchOptions(headless);
     let context;
     try {
       context = await chromium.launchPersistentContext(dir, options);
     } catch (error) {
       const hint = /Executable doesn't exist|browserType\.launch/.test(String(error?.message))
-        ? '未找到可用的浏览器内核。请执行 `npx playwright install chromium`，或在「设置 → 浏览器」中填写本机 Chrome/Edge 的 executablePath。'
+        ? '未找到可用的浏览器内核。请执行 `npx playwright install chromium`，或在「系统设置 → 浏览器与运行」中填写本机 Chrome/Edge 的 executablePath。'
         : String(error?.message || error);
       throw new Error(`启动浏览器失败：${hint}`);
     }
@@ -75,6 +76,7 @@ export function createBrowserManager({ getSettings, getSubject }) {
       lastUsedAt: Date.now(),
       busy: false,
       pages: initialPages,
+      headless: options.headless === true,
     };
     context.on('page', (page) => {
       entry.lastUsedAt = Date.now();
@@ -87,11 +89,19 @@ export function createBrowserManager({ getSettings, getSubject }) {
     return entry;
   }
 
-  async function getSession(subjectId) {
+  async function getSession(subjectId, { headless } = {}) {
     let entry = sessions.get(subjectId);
-    if (entry?.context) return entry;
+    if (entry?.context) {
+      // 现有会话的显示模式与请求不一致时，先关闭再按新模式重启（同一 profile 目录）
+      if (headless !== undefined && entry.headless !== Boolean(headless)) {
+        await close(subjectId);
+        entry = null;
+      } else {
+        return entry;
+      }
+    }
     if (entry?.launching) return entry.launching;
-    const launching = launch(subjectId).finally(() => {
+    const launching = launch(subjectId, { headless }).finally(() => {
       const current = sessions.get(subjectId);
       if (current && !current.context) sessions.delete(subjectId);
     });
@@ -99,8 +109,8 @@ export function createBrowserManager({ getSettings, getSubject }) {
     return launching;
   }
 
-  async function getPage(subjectId) {
-    const entry = await getSession(subjectId);
+  async function getPage(subjectId, options = {}) {
+    const entry = await getSession(subjectId, options);
     const pages = entry.context.pages().filter((p) => !p.isClosed());
     const page = pages[0] || await entry.context.newPage();
     entry.lastUsedAt = Date.now();
@@ -122,13 +132,43 @@ export function createBrowserManager({ getSettings, getSubject }) {
     });
   }
 
-  async function close(subjectId) {
+  async function close(subjectId, { timeoutMs = 8000 } = {}) {
     const entry = sessions.get(subjectId);
     sessions.delete(subjectId);
-    if (!entry?.context) return;
-    try {
-      await entry.context.close();
-    } catch { /* ignore */ }
+    let context = entry?.context || null;
+    if (!context && entry?.launching) {
+      // 正在启动中的会话：等待启动完成后再关闭，避免遗留孤儿浏览器
+      const launched = await entry.launching.catch(() => null);
+      context = launched?.context || null;
+    }
+    if (!context) return;
+    await Promise.race([
+      context.close().catch(() => undefined),
+      new Promise((resolve) => setTimeout(resolve, timeoutMs).unref?.()),
+    ]);
+  }
+
+  /** 删除主体浏览器登录态目录；backupDir 存在时先移动到备份目录而不是直接删除 */
+  async function removeProfile(subjectId, { backupDir = null } = {}) {
+    await close(subjectId).catch(() => undefined);
+    const dir = profileDir(subjectId);
+    if (!fs.existsSync(dir)) return { removed: true, backupPath: null };
+    if (backupDir) {
+      try {
+        await ensureDir(backupDir);
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const target = path.join(backupDir, `${subjectId}-${stamp}`);
+        await fsp.rename(dir, target);
+        return { removed: true, backupPath: target };
+      } catch { /* 占用/跨盘时回退复制后删除 */ }
+      try {
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const target = path.join(backupDir, `${subjectId}-copy-${stamp}`);
+        await fsp.cp(dir, target, { recursive: true, force: true });
+      } catch { /* 复制失败则直接删除 */ }
+    }
+    await fsp.rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    return { removed: true, backupPath: null };
   }
 
   async function closeAll() {
@@ -152,11 +192,6 @@ export function createBrowserManager({ getSettings, getSubject }) {
       await fsp.cp(fromDir, target, { recursive: true, force: true });
       await fsp.rm(fromDir, { recursive: true, force: true }).catch(() => undefined);
     }
-  }
-
-  async function removeProfile(subjectId) {
-    await close(subjectId).catch(() => undefined);
-    await fsp.rm(profileDir(subjectId), { recursive: true, force: true }).catch(() => undefined);
   }
 
   function profileExists(subjectId) {
