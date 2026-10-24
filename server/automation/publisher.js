@@ -24,6 +24,24 @@ export class PublishError extends Error {
 
 const EXACT_CONTAINERS = 'button, a, [role="button"], .ant-btn, .weui-btn, .mp-button, span';
 
+/** 从配置的链接/商品ID中解析用于商品搜索的 ID（支持纯 ID、商品 URL 参数、路径） */
+export function parseProductId(value) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  if (/^[A-Za-z0-9_-]{6,}$/.test(text)) return text;
+  const patterns = [
+    /[?&#](?:id|product_id|productId|goods_id|goodsId|itemId)=([A-Za-z0-9_-]{6,})/i,
+    /(?:product|goods|detail|item)\/([A-Za-z0-9_-]{6,})/i,
+  ];
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match) return match[1];
+  }
+  const digits = text.match(/\d{6,}/g);
+  if (digits?.length) return [...digits].sort((a, b) => b.length - a.length)[0];
+  return text;
+}
+
 export function createPublisher({ browser, getSettings, getSelectors, subjects }) {
   const baseTiming = () => getSettings()?.timing || {};
   let timingOverride = null;
@@ -478,13 +496,106 @@ export function createPublisher({ browser, getSettings, getSelectors, subjects }
 
   async function setExtLink(page, url, onProgress) {
     if (!url) return { ok: false, reason: '未配置链接' };
-    const input = await firstVisible(page, getSelectors().publish.extLinkInputSelectors, { timeout: 3000 });
-    if (!input) return { ok: false, reason: '未找到链接输入框' };
-    onProgress?.({ step: 'ext-link', message: `填写链接：${truncate(url, 40)}` });
+    const sel = getSelectors().publish;
+    // 新版发表页「链接」是「选择链接 → 商品 → 选择需要添加的商品」的商品选择流程
+    const linkItem = page.locator(sel.linkFormItemSelector).first();
+    if (await linkItem.count().catch(() => 0)) {
+      return selectProductLink(page, linkItem, url, onProgress);
+    }
+    // 旧版页面兜底：直接填写链接输入框
+    const input = await firstVisible(page, sel.extLinkInputSelectors, { timeout: 3000 });
+    if (!input) return { ok: false, reason: '未找到链接选项' };
+    onProgress?.({ step: 'link-product', message: `填写链接：${truncate(url, 40)}` });
     await input.click().catch(() => undefined);
     await input.fill(url);
+    await sleep(1000);
+    return { ok: true, legacy: true };
+  }
+
+  /** 新版链接：商品 → 选择需要添加的商品 → 按链接里的商品ID搜索 → 选中 → 右下角添加 */
+  async function selectProductLink(page, linkItem, value, onProgress) {
+    const sel = getSelectors().publish;
+    const searchId = parseProductId(value);
+    if (!searchId) return { ok: false, reason: '未能从配置的链接中解析出商品ID' };
+    const display = linkItem.locator(sel.linkDisplaySelector).first();
+    if (!(await display.count().catch(() => 0))) return { ok: false, reason: '未找到链接选择入口' };
+    await display.click({ timeout: 5000 });
+    await sleep(400);
+    const productOption = linkItem.locator(sel.linkOptionItemSelector).filter({ hasText: sel.linkProductOptionText }).first();
+    if (!(await productOption.count().catch(() => 0)) || !(await productOption.isVisible().catch(() => false))) {
+      return { ok: false, reason: '当前页面没有「商品」链接选项（账号可能没有商品权限）' };
+    }
+    onProgress?.({ step: 'link-product', message: '链接类型：商品' });
+    await productOption.click({ timeout: 5000 });
+    await sleep(700);
+
+    const trigger = page.getByText(sel.linkProductTriggerText, { exact: false }).first();
+    try {
+      await trigger.waitFor({ state: 'visible', timeout: 8000 });
+    } catch {
+      return { ok: false, reason: '未出现「选择需要添加的商品」入口' };
+    }
+    onProgress?.({ step: 'link-product', message: '打开商品选择器' });
+    await trigger.click({ timeout: 5000 });
+    await sleep(500);
+
+    const dialog = page.locator(sel.productDialogSelector).filter({ hasText: sel.productDialogTitleText }).first();
+    try {
+      await dialog.waitFor({ state: 'visible', timeout: 10_000 });
+    } catch {
+      return { ok: false, reason: '商品选择弹窗未打开' };
+    }
+    const searchInput = await firstVisible(page, sel.productSearchInputSelectors, { timeout: 8000 });
+    if (!searchInput) return { ok: false, reason: '未找到商品搜索输入框' };
+    await searchInput.fill(searchId);
+    const filterButton = dialog.locator('button').filter({ hasText: new RegExp(sel.productSearchButtonTexts.join('|')) }).first();
+    if (await filterButton.count().catch(() => 0)) {
+      await filterButton.click({ timeout: 5000 }).catch(() => undefined);
+    } else {
+      await searchInput.press('Enter').catch(() => undefined);
+    }
+    onProgress?.({ step: 'link-product', message: `按商品ID搜索：${searchId}` });
     await sleep(1500);
-    return { ok: true };
+
+    const idNode = dialog.getByText(searchId, { exact: false }).first();
+    let found = false;
+    try {
+      await idNode.waitFor({ state: 'visible', timeout: 12_000 });
+      found = true;
+    } catch { found = false; }
+    if (!found) {
+      const body = await dialog.innerText().catch(() => '');
+      const empty = sel.productEmptyTexts.find((text) => body.includes(text));
+      return { ok: false, reason: empty ? `未找到商品ID ${searchId}（${empty}）` : `未找到商品ID ${searchId} 对应的商品` };
+    }
+    // 选中搜索结果：优先点击包含该 ID 的整行；找不到行时点击第一个可见单选框
+    const row = idNode.locator('xpath=ancestor::*[contains(@class,"item") or contains(@class,"row") or contains(@class,"product")][1]');
+    if (await row.count().catch(() => 0)) {
+      await row.first().click({ timeout: 5000 }).catch(() => undefined);
+    } else {
+      const radio = dialog.locator('input[type="radio"], .ant-radio-input').first();
+      await radio.click({ force: true, timeout: 3000 }).catch(() => undefined);
+    }
+    await sleep(700);
+    const addButton = dialog.locator('.weui-desktop-dialog__ft button').filter({ hasText: new RegExp(sel.productAddButtonTexts.join('|')) }).first();
+    if (!(await addButton.count().catch(() => 0))) return { ok: false, reason: '未找到「添加」按钮' };
+    let enabled = false;
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const cls = await addButton.getAttribute('class').catch(() => '');
+      const disabled = await addButton.isDisabled().catch(() => false);
+      if (!disabled && !String(cls || '').includes('disabled')) { enabled = true; break; }
+      await sleep(250);
+    }
+    if (!enabled) return { ok: false, reason: '商品未选中，「添加」按钮不可用' };
+    onProgress?.({ step: 'link-product', message: '完成添加商品' });
+    await addButton.click({ timeout: 5000 });
+    await dialog.waitFor({ state: 'hidden', timeout: 10_000 }).catch(() => undefined);
+    await sleep(800);
+    const linkText = await linkItem.innerText().catch(() => '');
+    if (linkText.includes(sel.linkProductTriggerText)) {
+      return { ok: false, reason: '商品添加后未回填到链接栏' };
+    }
+    return { ok: true, productId: searchId, productText: linkText.replace(/\s+/g, ' ').slice(0, 120) };
   }
 
   async function waitForSubmitEnabled(page, texts, timeout = 120_000) {
@@ -593,6 +704,7 @@ export function createPublisher({ browser, getSettings, getSelectors, subjects }
         if (options.extLink?.enabled) {
           const result = await setExtLink(page, options.extLink.value, progress);
           if (!result.ok) warnings.push(`链接设置失败：${result.reason}`);
+          else if (result.productId) notes.push(`链接商品ID：${result.productId}`);
         }
         if (options.scheduled?.enabled) {
           const result = await setScheduled(page, options.scheduled, progress);

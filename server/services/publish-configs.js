@@ -234,6 +234,9 @@ export class PublishConfigService {
       if (!Number.isFinite(time)) throw new Error('请选择定时发表时间');
       if (time < Date.now() - 60_000) throw new Error('定时发表时间不能早于当前时间');
     }
+    if (page.extLink.enabled && !String(page.extLink.value || '').trim()) {
+      throw new Error('勾选「链接」后，请填写商品链接或商品ID');
+    }
     if (config.subjectSelection.mode === 'ids' && !config.subjectSelection.ids.length) {
       throw new Error('请至少选择一个主体');
     }

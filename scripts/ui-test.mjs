@@ -239,6 +239,12 @@ async function main() {
     await waitFor(async () => (await page.locator('.toast:has-text("6-16")').count()) > 0, { timeout: 5000, label: '短标题长度提示' });
     ok('短标题少于 6 字时提示长度限制');
     await page.locator('.modal-body [data-short-value]').fill('这是一个合格短标题');
+    // 链接必填 + 商品ID
+    await page.locator('.modal-body [data-extlink-enabled]').check();
+    await page.locator('.modal-foot button[data-save]').click();
+    await waitFor(async () => (await page.locator('.toast:has-text("商品链接或商品ID")').count()) > 0, { timeout: 5000, label: '链接必填提示' });
+    ok('勾选「链接」但为空时提示必填');
+    await page.locator('.modal-body [data-extlink-value]').fill('10001727125779');
     await page.locator('.modal-foot button[data-save]').click();
     await waitFor(async () => (await page.locator('.card:has-text("UI 测试配置")').count()) > 0, { timeout: 10_000, label: '配置保存' });
     ok('发布配置保存成功');

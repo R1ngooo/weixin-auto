@@ -130,7 +130,7 @@ export const configsPage = {
       if (options.shortTitle?.enabled) parts.push(`短标题「${String(options.shortTitle.value || '').slice(0, 20)}」`);
       if (options.location?.enabled) parts.push('位置');
       if (options.collection?.enabled) parts.push('合集');
-      if (options.extLink?.enabled) parts.push('链接');
+      if (options.extLink?.enabled) parts.push(`链接${options.extLink.value ? `：${String(options.extLink.value).slice(0, 24)}` : ''}`);
       if (options.scheduled?.enabled) parts.push('定时发表');
       if (options.videoMark?.enabled) parts.push(`视频标注：${options.videoMark.value || '无需标注'}`);
       return parts.length ? parts.join(' · ') : '仅上传视频 + 描述';
@@ -422,7 +422,8 @@ export const configsPage = {
                   <div class="page-option">
                     <label class="check"><input type="checkbox" data-extlink-enabled ${cfg.pageOptions.extLink.enabled ? 'checked' : ''}> 链接</label>
                     <div class="mt-8" data-extlink-fields style="display:${cfg.pageOptions.extLink.enabled ? 'block' : 'none'}">
-                      <input type="text" data-extlink-value value="${esc(cfg.pageOptions.extLink.value)}" placeholder="填写商品链接或商品ID，例如：https://... 或 1234567890" style="max-width:520px">
+                      <input type="text" data-extlink-value value="${esc(cfg.pageOptions.extLink.value)}" placeholder="填写商品链接或商品ID，例如：https://... 或 10001727125779" style="max-width:520px">
+                      <div class="help-text">执行时会点击「链接 → 商品 → 选择需要添加的商品」，按这里填写的商品ID自动搜索、选中并完成添加；填整条商品链接时也会自动解析出ID。</div>
                     </div>
                   </div>
                   <div class="divider" style="margin:0"></div>
@@ -670,6 +671,10 @@ export const configsPage = {
             toast('定时发表时间不能早于当前时间（精确到分钟）', 'warn');
             return false;
           }
+        }
+        if (payload.pageOptions.extLink.enabled && !String(payload.pageOptions.extLink.value || '').trim()) {
+          toast('勾选「链接」后，请填写商品链接或商品ID', 'warn');
+          return false;
         }
         return true;
       }

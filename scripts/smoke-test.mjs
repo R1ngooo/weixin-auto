@@ -522,6 +522,31 @@ async function main() {
       return '过去时间拒绝，未来时间可保存，废弃字段已清理';
     });
 
+    await check('链接商品ID解析与必填校验', async () => {
+      const { parseProductId } = await import(new URL('../server/automation/publisher.js', import.meta.url));
+      assert(parseProductId('10001727125779') === '10001727125779', '纯商品ID应原样返回');
+      assert(parseProductId('https://channels.weixin.qq.com/platform/product/10001727125779?from=share') === '10001727125779', '商品链接路径中的ID应被解析');
+      assert(parseProductId('https://example.com/detail?goods_id=10001727125779&a=1') === '10001727125779', '商品链接参数中的ID应被解析');
+      let emptyError = '';
+      try {
+        await api('/configs', {
+          method: 'POST',
+          body: {
+            name: '链接必填校验配置',
+            config: {
+              resourceTags: [state.videoTag, state.textTag],
+              subjectSelection: { mode: 'ids', ids: [state.subject.id] },
+              videoSelection: { strategy: 'random', requireUploaded: '' },
+              textSelection: { strategy: 'random', requireUploaded: '' },
+              pageOptions: { extLink: { enabled: true, value: '' } },
+            },
+          },
+        });
+      } catch (error) { emptyError = error.message; }
+      assert(/请填写商品链接或商品ID/.test(emptyError), `空链接应被拒绝，实际：${emptyError}`);
+      return '纯ID/链接路径/链接参数均解析正确，空值被拒绝';
+    });
+
     await check('固定资源：标签+使用状态交集与多选循环分配', async () => {
       const videos = await api('/videos?pageSize=50');
       const texts = await api('/texts?pageSize=50');
