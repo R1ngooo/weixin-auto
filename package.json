@@ -1,0 +1,21 @@
+{
+  "name": "weixin-auto",
+  "version": "0.1.0",
+  "private": true,
+  "description": "视频号助手自动化上传工具：主体登录管理、视频池、文本池、发表动态自动化、标签分组、执行结果同步",
+  "type": "module",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "smoke": "node scripts/smoke-test.mjs",
+    "ui-test": "node scripts/ui-test.mjs"
+  },
+  "engines": {
+    "node": ">=22.16"
+  },
+  "dependencies": {
+    "express": "4.21.2",
+    "playwright-core": "1.60.0"
+  }
+}

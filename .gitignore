@@ -1,0 +1,27 @@
+# 依赖
+node_modules/
+pnpm-lock.yaml
+npm-debug.log*
+
+# 运行数据（数据库/登录态/截图/封面/备份，含隐私信息，绝不入库）
+data/
+.smoke-data/
+.ui-data/
+.debug-ui-data/
+.ribbon-data/
+.remove-data/
+.tmp-batch-data/
+.probe/
+
+# 日志与临时文件
+*.log
+*.tmp
+.tmp-*
+wxa-folder-*.txt
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

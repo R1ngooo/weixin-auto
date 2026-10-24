@@ -1,0 +1,497 @@
+/**
+ * 冒烟测试：在隔离的数据目录/端口启动一份服务，验证主要接口与执行链路。
+ * 运行：npm run smoke
+ */
+import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import fsp from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const DATA_DIR = path.join(ROOT, '.smoke-data');
+const PORT = Number(process.env.SMOKE_PORT || 3399);
+const BASE = `http://127.0.0.1:${PORT}/api`;
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const results = [];
+let passed = 0;
+let failed = 0;
+
+async function check(name, fn) {
+  try {
+    const info = await fn();
+    passed += 1;
+    results.push({ name, ok: true, info });
+    console.log(`  PASS  ${name}${info ? `  (${info})` : ''}`);
+    return true;
+  } catch (error) {
+    failed += 1;
+    results.push({ name, ok: false, error: String(error?.message || error) });
+    console.log(`  FAIL  ${name}\n        ${String(error?.message || error)}`);
+    return false;
+  }
+}
+
+function assert(condition, message) {
+  if (!condition) throw new Error(message || '断言失败');
+}
+
+async function api(pathname, { method = 'GET', body } = {}) {
+  const res = await fetch(BASE + pathname, {
+    method,
+    headers: body !== undefined ? { 'content-type': 'application/json' } : undefined,
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  const text = await res.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch { throw new Error(`响应不是 JSON：${text.slice(0, 200)}`); }
+  if (!res.ok || data?.ok === false) throw new Error(data?.error || `HTTP ${res.status}`);
+  return data.data;
+}
+
+async function waitFor(fn, { timeout = 60_000, interval = 500, label = '条件' } = {}) {
+  const deadline = Date.now() + timeout;
+  let lastError = null;
+  while (Date.now() < deadline) {
+    try {
+      const result = await fn();
+      if (result) return result;
+    } catch (error) {
+      lastError = error;
+    }
+    await sleep(interval);
+  }
+  throw new Error(`等待超时（${label}）${lastError ? `：${lastError.message}` : ''}`);
+}
+
+async function waitJob(jobId, { timeout = 120_000 } = {}) {
+  return waitFor(async () => {
+    const job = await api(`/jobs/${jobId}`);
+    if (job.status === 'running') return null;
+    if (job.status === 'success') return job;
+    throw new Error(`任务 ${job.status}：${job.error || ''}`);
+  }, { timeout, interval: 400, label: '后台任务完成' });
+}
+
+async function waitTask(taskId, { timeout = 180_000 } = {}) {
+  return waitFor(async () => {
+    const task = await api(`/tasks/${taskId}`);
+    if (['pending', 'running'].includes(task.status)) return null;
+    return task;
+  }, { timeout, interval: 800, label: '执行任务结束' });
+}
+
+let child = null;
+
+async function startServer() {
+  await fsp.rm(DATA_DIR, { recursive: true, force: true });
+  await fsp.mkdir(DATA_DIR, { recursive: true });
+  child = spawn(process.execPath, ['server/index.js'], {
+    cwd: ROOT,
+    env: {
+      ...process.env,
+      WXA_DATA_DIR: DATA_DIR,
+      WXA_PORT: String(PORT),
+      // 测试模式下系统文件夹选择不弹窗，直接返回该路径
+      WXA_DIALOG_TEST_PATH: path.join(DATA_DIR, 'media'),
+    },
+    stdio: 'ignore',
+    windowsHide: true,
+  });
+  await waitFor(async () => {
+    try {
+      const health = await api('/health');
+      return health.ok ? health : null;
+    } catch {
+      return null;
+    }
+  }, { timeout: 40_000, interval: 600, label: '服务启动' });
+}
+
+async function stopServer() {
+  if (!child) return;
+  try { child.kill(); } catch { /* ignore */ }
+  await sleep(800);
+  try { child.kill('SIGKILL'); } catch { /* ignore */ }
+  child = null;
+}
+
+async function main() {
+  console.log('视频号助手自动化工具 · 冒烟测试');
+  console.log(`数据目录：${DATA_DIR}`);
+  console.log(`端口：${PORT}\n`);
+  await startServer();
+  const state = {};
+
+  try {
+    await check('健康检查', async () => {
+      const health = await api('/health');
+      assert(health.ok, 'health.ok 应为 true');
+      return `v${health.version}`;
+    });
+
+    await check('设置读写', async () => {
+      const before = await api('/settings');
+      assert(before.settings.timing.stepDelayMs > 0, '默认设置应包含延迟配置');
+      await api('/settings', { method: 'PUT', body: { browser: { headless: true }, timing: { stepDelayMs: 300 } } });
+      const after = await api('/settings');
+      assert(after.settings.browser.headless === true, 'headless 未生效');
+      assert(after.settings.timing.stepDelayMs === 300, 'stepDelayMs 未生效');
+      return 'headless=true, stepDelayMs=300';
+    });
+
+    await check('标签 CRUD', async () => {
+      const videoTag = await api('/tags', { method: 'POST', body: { name: '视频-测试', color: '#fa9d3b' } });
+      const textTag = await api('/tags', { method: 'POST', body: { name: '文本-测试', color: '#5b9dff' } });
+      const subjectTag = await api('/tags', { method: 'POST', body: { name: '主体-测试', color: '#2ecc8f' } });
+      state.videoTag = videoTag.id;
+      state.textTag = textTag.id;
+      state.subjectTag = subjectTag.id;
+      const list = await api('/tags?withCounts=1');
+      assert(list.length === 3, `标签数量应为 3，实际 ${list.length}`);
+      await api(`/tags/${subjectTag.id}`, { method: 'PUT', body: { name: '主体-测试2' } });
+      return '3 个标签';
+    });
+
+    await check('视频文件夹与扫描', async () => {
+      const mediaDir = path.join(DATA_DIR, 'media');
+      await fsp.mkdir(mediaDir, { recursive: true });
+      for (const name of ['video-a.mp4', 'video-b.mp4', 'video-c.mov']) {
+        await fsp.writeFile(path.join(mediaDir, name), Buffer.from(`fake-video-${name}-`.repeat(100)));
+      }
+      await fsp.writeFile(path.join(mediaDir, 'ignore.txt'), 'not a video');
+      await api('/videos/folders', { method: 'POST', body: { path: mediaDir, recursive: true } });
+      const job = await api('/videos/scan', { method: 'POST', body: {} });
+      const done = await waitJob(job.id);
+      const list = await api('/videos?pageSize=50');
+      assert(list.total === 3, `应扫描到 3 个视频，实际 ${list.total}`);
+      state.videos = list.data;
+      state.mediaDir = mediaDir;
+      return `新增 ${done.result.added} 个`;
+    });
+
+    await check('系统文件夹选择接口（测试模式）', async () => {
+      const picked = await api('/system/pick-folder', { method: 'POST', body: {} });
+      assert(picked.path === state.mediaDir, `应返回预设测试路径，实际 ${picked.path}`);
+      return picked.path;
+    });
+
+    await check('扫描后自动计算 MD5', async () => {
+      // 扫描完成后会后台自动触发 MD5 计算，无需手动点按钮
+      const list = await waitFor(async () => {
+        const res = await api('/videos?pageSize=50');
+        return res.data.length && res.data.every((video) => video.md5) ? res : null;
+      }, { timeout: 90_000, label: '自动 MD5 完成' });
+      state.videos = list.data;
+      return `自动计算 ${list.data.filter((video) => video.md5).length} 个`;
+    });
+
+    await check('视频打标签', async () => {
+      for (const video of state.videos) {
+        await api(`/videos/${video.id}`, { method: 'PUT', body: { tagIds: [state.videoTag] } });
+      }
+      const list = await api(`/videos?tagIds=${state.videoTag}&pageSize=50`);
+      assert(list.total === 3, `按标签筛选应有 3 个视频，实际 ${list.total}`);
+      return '按标签筛选通过';
+    });
+
+    await check('文件夹导入标签 + 搜索包含标签', async () => {
+      const folderTag = await api('/tags', { method: 'POST', body: { name: '文件夹-测试', color: '#7c6cf2' } });
+      state.folderTag = folderTag.id;
+      const folders = await api('/videos/folders');
+      const folder = folders[0];
+      await api(`/videos/folders/${folder.id}`, { method: 'PUT', body: { tagIds: [folderTag.id] } });
+      const afterUpdate = await api('/videos/folders');
+      assert(afterUpdate[0].tagIds.includes(folderTag.id), '文件夹应保存导入标签');
+      const job = await api('/videos/scan', { method: 'POST', body: {} });
+      await waitJob(job.id);
+      const byTag = await api(`/videos?tagIds=${folderTag.id}&pageSize=50`);
+      assert(byTag.total === 3, `文件夹标签应应用到 3 个视频，实际 ${byTag.total}`);
+      const bySearch = await api(`/videos?q=${encodeURIComponent('文件夹-测试')}&pageSize=50`);
+      assert(bySearch.total === 3, `按标签名搜索应命中 3 个视频，实际 ${bySearch.total}`);
+      return `文件夹标签 ${byTag.total} 个视频，搜索命中 ${bySearch.total} 个`;
+    });
+
+    await check('文本导入与去重', async () => {
+      const result = await api('/texts/import', {
+        method: 'POST',
+        body: { text: '这是第一条测试文本内容\n这是第二条测试文本内容\n这是第三条测试文本内容\n', separator: 'line' },
+      });
+      assert(result.created === 3, `应新增 3 条，实际 ${result.created}`);
+      const dup = await api('/texts/import', {
+        method: 'POST',
+        body: { text: '这是第一条测试文本内容\n这是第二条测试文本内容', separator: 'line' },
+      });
+      assert(dup.duplicated === 2 && dup.created === 0, '重复导入应去重');
+      for (const text of (await api('/texts?pageSize=50')).data) {
+        await api(`/texts/${text.id}`, { method: 'PUT', body: { tagIds: [state.textTag] } });
+      }
+      const byTag = await api(`/texts?q=${encodeURIComponent('文本-测试')}&pageSize=50`);
+      assert(byTag.total === 3, `文本搜索应包含标签名，应命中 3 条，实际 ${byTag.total}`);
+      return `新增 ${result.created} 条，去重 ${dup.duplicated} 条`;
+    });
+
+    await check('批量打标签（追加/覆盖/移除）', async () => {
+      const videos = (await api('/videos?pageSize=50')).data.map((video) => video.id);
+      const texts = (await api('/texts?pageSize=50')).data.map((text) => text.id);
+      assert(videos.length === 3 && texts.length === 3, '批量标签测试需要 3 个视频和 3 条文本');
+      // 追加
+      const added = await api('/tags/assign', { method: 'POST', body: { kind: 'video', ids: videos, tagIds: [state.videoTag], mode: 'add' } });
+      assert(added.affected === 3, `追加标签应影响 3 个视频，实际 ${added.affected}`);
+      // 覆盖（先设置视频标签，再覆盖为空集合）→ 用 text 类型验证覆盖语义
+      await api('/tags/assign', { method: 'POST', body: { kind: 'text', ids: texts, tagIds: [state.textTag], mode: 'set' } });
+      let filtered = await api(`/texts?tagIds=${state.textTag}&pageSize=50`);
+      assert(filtered.total === 3, `覆盖后应有 3 条文本带标签，实际 ${filtered.total}`);
+      await api('/tags/assign', { method: 'POST', body: { kind: 'text', ids: [texts[0]], tagIds: [], mode: 'set' } });
+      filtered = await api(`/texts?tagIds=${state.textTag}&pageSize=50`);
+      assert(filtered.total === 2, `覆盖空集合后应剩 2 条，实际 ${filtered.total}`);
+      // 移除
+      await api('/tags/assign', { method: 'POST', body: { kind: 'text', ids: texts.slice(1), tagIds: [state.textTag], mode: 'remove' } });
+      filtered = await api(`/texts?tagIds=${state.textTag}&pageSize=50`);
+      assert(filtered.total === 0, `移除后应剩 0 条，实际 ${filtered.total}`);
+      // 恢复，供后续配置测试使用
+      await api('/tags/assign', { method: 'POST', body: { kind: 'text', ids: texts, tagIds: [state.textTag], mode: 'add' } });
+      return `视频 ${added.affected} 个，文本覆盖/移除通过`;
+    });
+
+    await check('主体创建', async () => {
+      const subject = await api('/subjects', { method: 'POST', body: { name: '冒烟测试主体', tagIds: [state.subjectTag] } });
+      state.subject = subject;
+      const list = await api('/subjects');
+      assert(list.length === 1, '主体数量应为 1');
+      const byTag = await api(`/subjects?q=${encodeURIComponent('主体-测试2')}`);
+      assert(byTag.length === 1, '主体搜索应包含标签名');
+      return subject.name;
+    });
+
+    await check('发布配置创建与预览', async () => {
+      const config = await api('/configs', {
+        method: 'POST',
+        body: {
+          name: '冒烟测试配置',
+          config: {
+            name: '冒烟测试配置',
+            action: 'draft',
+            subjectSelection: { mode: 'ids', ids: [state.subject.id], tags: [] },
+            videoSelection: { tags: [state.videoTag], strategy: 'sequential', preferUnuploaded: true, requireUploaded: null },
+            textSelection: { tags: [state.textTag], strategy: 'sequential', preferUnuploaded: true, requireUploaded: null },
+            pageOptions: {
+              description: { enabled: true, prefix: '【前缀】', suffix: '【后缀】', hashtags: ['测试标签'] },
+              original: { enabled: false },
+            },
+            syncWechat: false,
+          },
+        },
+      });
+      state.config = config;
+      const preview = await api(`/configs/${config.id}/preview`, { method: 'POST', body: {} });
+      assert(preview.items.length === 1, '预览应有 1 个主体');
+      assert(preview.items[0].video, '预览应选中视频');
+      assert(preview.items[0].text, '预览应选中文本');
+      const previewAgain = await api(`/configs/${config.id}/preview`, { method: 'POST', body: {} });
+      assert(previewAgain.items[0].video.id === preview.items[0].video.id, '预览不应消耗顺序进度');
+      assert(previewAgain.items[0].text.id === preview.items[0].text.id, '预览不应消耗文本顺序进度');
+      return `视频 #${preview.items[0].video.id}，文本 #${preview.items[0].text.id}`;
+    });
+
+    await check('创建演练任务', async () => {
+      const task = await api('/tasks', { method: 'POST', body: { configId: state.config.id, overrides: { dryRun: true } } });
+      assert(task.total === 1, `任务应包含 1 个主体，实际 ${task.total}`);
+      const item = task.items[0];
+      assert(item.videoId && item.textId, '任务项应包含视频与文本');
+      state.task = task;
+      return `${task.name}`;
+    });
+
+    await check('演练模式不消耗素材', async () => {
+      const before = await api(`/configs/${state.config.id}/preview`, { method: 'POST', body: {} });
+      const task = await api('/tasks', { method: 'POST', body: { configId: state.config.id, overrides: { dryRun: true } } });
+      assert(task.dryRun === true, '应标记为演练任务');
+      const after = await api(`/configs/${state.config.id}/preview`, { method: 'POST', body: {} });
+      assert(after.items[0].video.id === before.items[0].video.id, '演练任务不应推进视频选择进度');
+      assert(after.items[0].text.id === before.items[0].text.id, '演练任务不应推进文本选择进度');
+      const videos = await api('/videos?pageSize=50');
+      assert(videos.data.every((video) => video.uploadCount === 0), '演练任务不应增加使用次数');
+      return '选择进度与使用次数均未变化';
+    });
+
+    await check('演练测试环境开关（开启后计入使用状态）', async () => {
+      await api('/settings', { method: 'PUT', body: { testing: { dryRunCountsUsage: true } } });
+      const settings = await api('/settings');
+      assert(settings.settings.testing.dryRunCountsUsage === true, '演练测试环境开关未生效');
+      const before = await api(`/configs/${state.config.id}/preview`, { method: 'POST', body: {} });
+      const task = await api('/tasks', { method: 'POST', body: { configId: state.config.id, overrides: { dryRun: true } } });
+      assert(task.dryRun === true, '应仍为演练任务');
+      const after = await api(`/configs/${state.config.id}/preview`, { method: 'POST', body: {} });
+      assert(after.items[0].video.id !== before.items[0].video.id, '开启测试环境后演练任务应消耗视频选择进度');
+      await api('/settings', { method: 'PUT', body: { testing: { dryRunCountsUsage: false } } });
+      const restored = await api('/settings');
+      assert(restored.settings.testing.dryRunCountsUsage === false, '关闭开关未生效');
+      return '开启计入 / 关闭恢复';
+    });
+
+    await check('随机不可重复策略', async () => {
+      const base = structuredClone(state.config.config);
+      base.name = '随机策略配置';
+      base.videoSelection = { tags: [state.videoTag], strategy: 'random-unique', preferUnuploaded: false, requireUploaded: null };
+      base.textSelection = { tags: [state.textTag], strategy: 'random', preferUnuploaded: false, requireUploaded: null };
+      const config = await api('/configs', { method: 'POST', body: { name: base.name, config: base } });
+      const first = await api('/tasks', { method: 'POST', body: { configId: config.id, overrides: {} } });
+      const second = await api('/tasks', { method: 'POST', body: { configId: config.id, overrides: {} } });
+      assert(first.items[0].videoId !== second.items[0].videoId, '随机不可重复策略应选中不同视频');
+      await api(`/configs/${config.id}/reset-pool`, { method: 'POST', body: {} });
+      const third = await api('/tasks', { method: 'POST', body: { configId: config.id, overrides: {} } });
+      assert(third.total === 1, '重置选择进度后应能继续分配资源');
+      return `视频 #${first.items[0].videoId} → #${second.items[0].videoId}`;
+    });
+
+    await check('执行任务（未登录应失败并记录原因）', async () => {
+      await api(`/tasks/${state.task.id}/start`, { method: 'POST', body: {} });
+      const task = await waitTask(state.task.id);
+      assert(task.status === 'failed', `任务状态应为失败，实际 ${task.status}`);
+      const item = task.items[0];
+      assert(item.status === 'failed', `任务项状态应为失败，实际 ${item.status}`);
+      assert(/登录|过期|session|SES/i.test(item.error || ''), `失败原因应提示登录态问题，实际：${item.error}`);
+      assert(item.screenshot, '失败时应保存截图');
+      const videosAfter = await api('/videos?pageSize=50');
+      assert(videosAfter.data.every((video) => video.uploadCount === 0), '演练执行不应增加“已上传”次数');
+      return `状态 ${task.status}：${String(item.error).slice(0, 40)}`;
+    });
+
+    await check('微信机器人（dsh-im 导入）', async () => {
+      const status = await api('/wechat/status');
+      if (!status.dshIm.available || !status.dshIm.accounts.length) return '跳过（本机无 dsh-im 微信机器人）';
+      await api('/wechat/import', { method: 'POST', body: {} });
+      const after = await api('/wechat/status');
+      assert(after.bots.length >= 1, '导入后应有已绑定机器人');
+      assert(after.enabled === true, '导入后应启用同步');
+      return `${after.bots.length} 个机器人`;
+    });
+
+    await check('微信机器人扫码接口（仅申请二维码）', async () => {
+      let attempt;
+      try {
+        attempt = await api('/wechat/bind', { method: 'POST', body: {} });
+      } catch (error) {
+        return `跳过（微信服务不可达：${String(error.message).slice(0, 40)}）`;
+      }
+      assert(attempt.qrUrl, '应返回二维码地址');
+      const qr = await fetch(`http://127.0.0.1:${PORT}${attempt.qrUrl}`);
+      assert(qr.ok, `二维码代理应可访问，HTTP ${qr.status}`);
+      const bytes = (await qr.arrayBuffer()).byteLength;
+      assert(bytes > 100, '二维码图片应为非空');
+      await api(`/wechat/bind/${attempt.attemptId}/cancel`, { method: 'POST', body: {} });
+      return `${bytes} 字节`;
+    });
+
+    await check('配置导出', async () => {
+      const res = await fetch(`http://127.0.0.1:${PORT}/api/settings/export`);
+      const payload = await res.json();
+      assert(payload.app === 'weixin-auto', '导出内容应包含 app 标识');
+      assert(payload.tags?.length === 4, `导出应包含标签，实际 ${payload.tags?.length}`);
+      assert(payload.videos?.length === 3, '导出应包含视频元数据');
+      assert(payload.texts?.length === 3, '导出应包含文本');
+      assert(payload.publishConfigs?.length >= 2, '导出应包含发布配置');
+      state.export = payload;
+      return `设置/标签/主体/视频/文本/配置`;
+    });
+
+    await check('配置导入（合并去重）', async () => {
+      const result = await api('/settings/import', { method: 'POST', body: { payload: state.export, mode: 'merge' } });
+      const videos = await api('/videos?pageSize=50');
+      assert(videos.total === 3, '重复导入视频不应产生重复记录');
+      return `新增 视频${result.stats.videos} 主体${result.stats.subjects} 文本${result.stats.texts}`;
+    });
+
+    await check('软移除视频（保留数据库记录）', async () => {
+      const before = await api('/videos?pageSize=50');
+      const target = before.data[0];
+      await api(`/videos/${target.id}`, { method: 'DELETE' });
+      const after = await api('/videos?pageSize=50');
+      assert(after.total === before.total - 1, `移除后应少 1 个视频，实际 ${after.total}`);
+      assert(!after.data.some((video) => video.id === target.id), '移除后不应再出现在视频池列表');
+      assert(target.md5, '被移除视频应有 MD5（用于重新关联）');
+      state.removedVideo = target;
+      state.removedCount = after.total;
+      return `已软移除 #${target.id}（记录保留，按 MD5 关联）`;
+    });
+
+    await check('重新扫描按 MD5 恢复已移除视频', async () => {
+      const target = state.removedVideo;
+      const mediaDir = state.mediaDir;
+      const newName = 'video-renamed.mp4';
+      await fsp.rename(target.path, path.join(mediaDir, newName)).catch(() => undefined);
+      const job = await api('/videos/scan', { method: 'POST', body: {} });
+      const done = await waitJob(job.id);
+      const list = await api('/videos?pageSize=50');
+      assert(list.total === state.removedCount + 1, `重新扫描后应恢复为 ${state.removedCount + 1} 个视频，实际 ${list.total}`);
+      const restored = list.data.find((video) => video.md5 === target.md5);
+      assert(restored, '应按 MD5 找到恢复后的视频');
+      assert(restored.id === target.id, `恢复后应沿用原记录 ID（${target.id}），实际 ${restored.id}`);
+      assert(restored.name === newName, `恢复后名称应为新文件名，实际 ${restored.name}`);
+      assert(restored.tags.some((tag) => Number(tag.id) === state.videoTag), '恢复后应保留原有标签');
+      return `恢复记录 #${restored.id}：${restored.name}（扫描恢复 ${done.result.archived || 0} 个）`;
+    });
+
+    await check('系统目录浏览接口', async () => {
+      const subDir = path.join(state.mediaDir, '子文件夹');
+      await fsp.mkdir(subDir, { recursive: true });
+      const listing = await api(`/system/dirs?path=${encodeURIComponent(state.mediaDir)}`);
+      assert(listing.path.toLowerCase().endsWith('media'), `返回路径异常：${listing.path}`);
+      assert(listing.parent, '应返回上一级路径');
+      assert(listing.entries.some((entry) => entry.name === '子文件夹'), '应列出子文件夹');
+      const root = await api('/system/dirs');
+      assert(root.drives.length > 0, '应列出本机磁盘');
+      return `盘符 ${root.drives.length} 个，子目录 ${listing.entries.length} 个`;
+    });
+
+    await check('视频封面接口', async () => {
+      let job = null;
+      try {
+        job = await api('/videos/thumbnails', { method: 'POST', body: { force: true } });
+      } catch (error) {
+        // 测试环境下没有可解码的视频/浏览器时允许直接失败，但接口不能 500
+        assert(!/HTTP 500/.test(error.message), '封面接口不应返回 500');
+        return `跳过：${String(error.message).slice(0, 40)}`;
+      }
+      const done = await waitJob(job.id, { timeout: 120_000 });
+      const videoList = await api('/videos?pageSize=10');
+      const video = videoList.data.find((item) => !item.missing);
+      assert(video, '应有可测试的视频记录');
+      const thumbResponse = await fetch(`http://127.0.0.1:${PORT}/api/videos/${video.id}/thumbnail`);
+      assert(thumbResponse.status === 404 || thumbResponse.status === 200, `封面接口状态异常：${thumbResponse.status}`);
+      const status = await api('/videos/thumbnails/status');
+      assert(typeof status.total === 'number' && typeof status.ready === 'number', '封面状态字段不完整');
+      return `任务 ${done.status}，封面 ${status.ready}/${status.total}`;
+    });
+
+    await check('页面探测接口可用性', async () => {
+      // 未登录主体探测会失败，但应返回可读错误而不是 500
+      try {
+        await api(`/probe/${state.subject.id}`, { method: 'POST', body: {} });
+        return '探测成功';
+      } catch (error) {
+        assert(!/HTTP 500/.test(error.message), '探测不应返回 500');
+        return `预期失败：${String(error.message).slice(0, 40)}`;
+      }
+    });
+  } finally {
+    await stopServer();
+  }
+
+  console.log(`\n结果：通过 ${passed} 项，失败 ${failed} 项`);
+  if (failed > 0) {
+    console.log('失败详情：');
+    for (const item of results.filter((r) => !r.ok)) console.log(` - ${item.name}: ${item.error}`);
+    process.exitCode = 1;
+  } else {
+    console.log('全部通过 ✅');
+  }
+}
+
+main().catch((error) => {
+  console.error('冒烟测试异常：', error);
+  stopServer().finally(() => process.exit(1));
+});
