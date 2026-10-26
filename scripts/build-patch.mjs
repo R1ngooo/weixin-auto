@@ -89,8 +89,17 @@ async function main() {
     else changed.push(filePath);
   }
 
-  const dependencyChanged = changed.concat(deleted).some((file) => file === 'package.json' || file === 'package-lock.json');
-  if (dependencyChanged) throw new Error('package.json/package-lock.json 发生变化：请发布完整便携包，补丁只支持源码级升级');
+  const dependencyChanged = await (async () => {
+    try {
+      const fromPkg = JSON.parse((await runGitBuffer(['show', `${from}:package.json`])).toString('utf8'));
+      const toPkg = JSON.parse((await runGitBuffer(['show', `${to}:package.json`])).toString('utf8'));
+      const pick = (pkg) => JSON.stringify({ dependencies: pkg.dependencies || {}, devDependencies: pkg.devDependencies || {}, engines: pkg.engines || {} });
+      return pick(fromPkg) !== pick(toPkg);
+    } catch {
+      return changed.concat(deleted).some((file) => file === 'package.json' || file === 'package-lock.json');
+    }
+  })();
+  if (dependencyChanged) throw new Error('依赖/Node 引擎发生变化：请发布完整便携包，补丁只支持源码级升级');
 
   const files = [];
   for (const file of [...new Set(changed)]) {
