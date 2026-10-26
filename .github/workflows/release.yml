@@ -46,7 +46,7 @@ jobs:
 
       - name: Build patch from previous release
         if: steps.version.outputs.previous != ''
-        run: npm run build:patch -- --from ${{ steps.version.outputs.previous }} --to HEAD
+        run: node scripts/build-patch.mjs --from ${{ steps.version.outputs.previous }} --to HEAD
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

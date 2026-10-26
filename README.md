@@ -213,7 +213,7 @@ weixin-auto/
 ## 9. 测试
 
 ```bash
-npm run smoke       # 隔离数据目录启动服务，验证 API/扫描/自动MD5/标签组/删除保护/演练零污染/软移除+MD5恢复/导出导入（含缺失路径跳过）/主体合并/无头扫码/资源标签配置/短标题与定时校验/固定资源/每主体数量/随机不重复自动重置/链接商品ID/定时发表/任务级定时执行/先传后搭预热/版本升级接口等 42 项
+npm run smoke       # 隔离数据目录启动服务，验证 API/扫描/自动MD5/标签组/删除保护/演练零污染/软移除+MD5恢复/导出导入（含缺失路径跳过）/主体合并/无头扫码/资源标签配置/短标题与定时校验/固定资源/每主体数量/随机不重复自动重置/链接商品ID/定时发表/任务级定时执行/先传后搭预热/版本升级接口/微信错误分类等 43 项
 npm run ui-test     # Playwright 驱动面板：主体卡片/删除确认、无头扫码与快速刷新、标签组、发布配置新排版与排期控件、任务定时执行灰置、设置页版本/补丁入口、导入缺失路径提示等
 npm run test:wechat # 微信机器人封装稳定性 mock 自检（连续发送/会话续期通知/冷却/网络错误），默认不发真实消息
 npm run test:patch  # 补丁应用自检：文件更新/删除/备份/版本、哈希错误/路径穿越/依赖变更拒绝
@@ -359,7 +359,7 @@ npm run test:package # 验证已构建的便携包：内置 Node/Chromium、/api
 npm install
 npm run build:portable                  # 生成 dist/weixin-auto-<版本>-win-x64.zip + sha256
 npm run test:package                    # 验证 staging 便携包（Node/Chromium/health/升级接口）
-npm run build:patch -- --from <ref> --to <ref>  # 生成补丁 zip（需先修改版本号）
+node scripts/build-patch.mjs --from <ref> --to <ref>    # 生成补丁 zip（需先修改版本号）
 npm run test:patch                      # 补丁应用/校验/回滚自检
 ```
 
