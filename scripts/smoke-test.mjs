@@ -744,6 +744,31 @@ async function main() {
       return `状态 ${task.status}：${String(item.error).slice(0, 40)}`;
     });
 
+    await check('先传后搭：任务启动时触发素材预热', async () => {
+      const config = await api('/configs', {
+        method: 'POST',
+        body: {
+          name: '先传后搭预热配置',
+          config: {
+            resourceTags: [state.videoTag, state.textTag],
+            subjectSelection: { mode: 'ids', ids: [state.subject.id] },
+            videoSelection: { strategy: 'random', requireUploaded: '' },
+            textSelection: { strategy: 'random', requireUploaded: '' },
+            pageOptions: { preUploadAll: { enabled: true }, description: { enabled: false } },
+            pool: { allowReset: false, scope: 'config' },
+          },
+        },
+      });
+      assert(config.config.pageOptions.preUploadAll.enabled === true, '先传后搭配置应保存');
+      const task = await api('/tasks', { method: 'POST', body: { configId: config.id, overrides: { dryRun: true, name: '先传后搭预热验证' } } });
+      await api(`/tasks/${task.id}/start`, { method: 'POST', body: {} });
+      const detail = await waitTask(task.id);
+      const logs = (detail.items || []).flatMap((item) => item.logs || []);
+      const warmupLogs = logs.filter((log) => /素材预热|预热上传|预热视频/.test(log.message || ''));
+      assert(warmupLogs.length > 0, `任务日志应包含素材预热记录，实际 ${logs.length} 条`);
+      return `预热日志 ${warmupLogs.length} 条：${warmupLogs[0].message.slice(0, 40)}`;
+    });
+
     await check('微信机器人（dsh-im 导入）', async () => {
       const status = await api('/wechat/status');
       if (!status.dshIm.available || !status.dshIm.accounts.length) return '跳过（本机无 dsh-im 微信机器人）';
