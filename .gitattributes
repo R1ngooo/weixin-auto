@@ -1,0 +1,5 @@
+# 统一换行，避免 Windows 批处理在 git checkout / 补丁中变成 LF 而无法运行
+* text=auto
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.sh text eol=lf

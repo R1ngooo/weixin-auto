@@ -108,7 +108,15 @@ async function main() {
       continue;
     }
     const data = await runGitBuffer(['show', `${to}:${file}`]);
-    files.push({ path: file, sha256: crypto.createHash('sha256').update(data).digest('hex'), size: data.length, data });
+    // Git 仓库按 text/autocrlf 存储时 blob 可能是 LF；补丁里的 cmd/bat 必须还原 CRLF
+    const normalized = /\.(cmd|bat)$/i.test(file)
+      ? Buffer.from(data.toString('utf8').replace(/\r?\n/g, '\r\n'), 'utf8')
+      : data;
+    if (file === 'start.cmd') {
+      if (/[^\x00-\x7F]/.test(normalized.toString('utf8'))) throw new Error('start.cmd 必须为纯 ASCII');
+      if (!normalized.includes(Buffer.from('\r\n'))) throw new Error('start.cmd 必须为 CRLF');
+    }
+    files.push({ path: file, sha256: crypto.createHash('sha256').update(normalized).digest('hex'), size: normalized.length, data: normalized });
   }
   const deletes = [...new Set(deleted)].filter((file) => allowed(file));
   if (!files.some((file) => file.path === 'version.json')) {
