@@ -59,6 +59,7 @@ export const tasksPage = {
               <td>
                 <div style="font-weight:600">${esc(task.name)}</div>
                 ${task.syncStatus ? `<div class="small muted-2">微信同步：${task.syncStatus === 'success' ? '已推送' : '失败'}</div>` : ''}
+                ${task.scheduleKind ? `<div class="small muted-2">${task.scheduleKind === 'publish' ? '定时发表' : '定时执行'}：起点 ${esc(fmtDate(task.scheduledAt))} · 间隔 ${Number(task.scheduleIntervalMinutes || 0)} 分钟</div>` : ''}
               </td>
               <td>${statusBadge(task.status, TASK_STATUS)}</td>
               <td class="small">${task.dryRun ? badge('演练', 'blue') : task.action === 'publish' ? badge('发表', 'orange') : badge('草稿', 'gray')}</td>
@@ -109,7 +110,7 @@ export const tasksPage = {
       const task = state.detail;
       if (!task) return;
       clearTimeout(state.timer);
-      ctx.setTitle(`任务详情：${task.name}`, `创建于 ${fmtDate(task.createdAt)} · ${task.total} 个主体`);
+      ctx.setTitle(`任务详情：${task.name}`, `创建于 ${fmtDate(task.createdAt)} · ${task.total} 个任务项`);
       // 只改本页自己的刷新按钮，避免页面切换后误改其它页面的顶栏按钮
       const refreshButton = actionsEl.querySelector('[data-act="refresh"]');
       if (refreshButton) refreshButton.textContent = '刷新';
@@ -129,7 +130,7 @@ export const tasksPage = {
               ${task.dryRun ? badge('演练模式', 'blue') : task.action === 'publish' ? badge('直接发表', 'orange') : badge('保存草稿', 'gray')}
               ${task.syncStatus ? (task.syncStatus === 'success' ? badge('微信已推送', 'green') : badge('微信推送失败', 'red')) : ''}
             </div>
-            <div class="small muted">${finished ? `完成于 ${esc(fmtDate(task.finishedAt))}` : task.running ? '执行中…' : '等待开始'}</div>
+            <div class="small muted">${finished ? `完成于 ${esc(fmtDate(task.finishedAt))}` : task.running ? '执行中…' : task.scheduleKind === 'run' && task.scheduledAt ? `将于 ${esc(fmtDate(task.scheduledAt, true))} 自动开始` : '等待开始'}</div>
           </div>
           <div class="progress-bar mt-16"><span style="width:${percent}%"></span></div>
           <div class="row between mt-8">
@@ -164,6 +165,7 @@ export const tasksPage = {
             · 文本：${item.textPreview ? esc(item.textPreview.slice(0, 60)) : '-'}
             ${item.postId ? ` · 作品ID：${esc(item.postId)}` : ''}
           </div>
+          ${item.scheduledAt ? `<div class="small muted-2">${task.scheduleKind === 'publish' ? '定时发表' : '计划开始'}：${esc(fmtDate(item.scheduledAt, true))}</div>` : ''}
           ${item.logs?.length ? `<details><summary>执行日志（${item.logs.length} 条）</summary>
             <div class="log-list mt-8">${item.logs.map((log) => `<div class="log-line ${/warn|失败|错误/.test(log.message) ? 'warn' : /result/.test(log.step) ? 'result' : ''}"><span class="t">${esc(log.t)}</span><span>${esc(log.message)}</span></div>`).join('')}</div>
           </details>` : ''}

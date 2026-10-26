@@ -1,6 +1,7 @@
 import { getDb } from '../db.js';
 import { getSettings } from '../settings.js';
 import { nowIso, sleep, truncate, uid } from '../util.js';
+import { SCHEDULE_MIN_LEAD_MS, SCHEDULE_INTERVAL_MIN } from './publish-configs.js';
 
 const db = () => getDb();
 
@@ -23,6 +24,8 @@ export class TaskService {
     this.cancelRequested = new Set();
     this.progressBuffers = new Map();
     this.finishWaiters = new Map();
+    this.schedulerTimer = null;
+    this.startOptions = new Map();
   }
 
   resolveScope(config, subjectId) {
@@ -33,8 +36,9 @@ export class TaskService {
   create({ configId, overrides = {} }) {
     const record = this.configs.get(configId);
     if (!record) throw new Error('发布配置不存在');
-    // 保存/执行前统一校验：短标题、定时、固定资源范围、主体等
-    const config = this.configs.validateConfig({ ...record.config });
+    // 保存/执行前统一校验：短标题、定时、固定资源范围、主体等；
+    // 定时起点在保存时已要求 +10 分钟，这里放宽，由任务创建时按实际计划时间判断是否已过期
+    const config = this.configs.validateConfig({ ...record.config }, { enforceScheduleLead: false });
     if (overrides.action === 'draft' || overrides.action === 'publish') config.action = overrides.action;
     const dryRun = Boolean(overrides.dryRun);
     // 演练测试环境：开启后演练模式照常计入素材使用状态与使用次数（默认不污染）
@@ -48,6 +52,33 @@ export class TaskService {
       Number.parseInt(overrides.perSubjectCount ?? config.videoSelection.perSubjectCount ?? 1, 10) || 1,
     ));
     config.videoSelection = { ...config.videoSelection, perSubjectCount };
+
+    const configScheduled = config.pageOptions.scheduled || {};
+    const scheduleOverride = overrides.schedule || {};
+    const wantTaskSchedule = scheduleOverride.enabled === true;
+    if (wantTaskSchedule && configScheduled.enabled) {
+      throw new Error('发布配置已启用定时发表，任务内不能再设置定时执行');
+    }
+    let scheduleKind = null;
+    let scheduleBaseMs = null;
+    let scheduleIntervalMinutes = null;
+    if (configScheduled.enabled) {
+      scheduleKind = 'publish';
+      scheduleBaseMs = Date.parse(configScheduled.value);
+      scheduleIntervalMinutes = configScheduled.intervalMinutes;
+      if (!Number.isFinite(scheduleBaseMs)) throw new Error('发布配置的定时发表时间无效，请重新编辑配置');
+    } else if (wantTaskSchedule) {
+      scheduleKind = 'run';
+      scheduleBaseMs = Date.parse(scheduleOverride.value);
+      if (!Number.isFinite(scheduleBaseMs)) throw new Error('请选择定时执行时间');
+      if (scheduleBaseMs < Date.now() + SCHEDULE_MIN_LEAD_MS - 30_000) {
+        throw new Error('定时执行时间需晚于当前时间至少 10 分钟（容错）');
+      }
+      scheduleIntervalMinutes = Number.parseInt(scheduleOverride.intervalMinutes, 10);
+      if (!Number.isInteger(scheduleIntervalMinutes) || scheduleIntervalMinutes < SCHEDULE_INTERVAL_MIN) {
+        throw new Error(`定时执行间隔需为不少于 ${SCHEDULE_INTERVAL_MIN} 分钟的整数`);
+      }
+    }
 
     const id = uid('task_');
     const now = nowIso();
@@ -65,9 +96,11 @@ export class TaskService {
         const item = {
           id: uid('item_'),
           subject,
+          round,
           video: null,
           text: null,
           pickError: null,
+          scheduledAt: null,
         };
         // 演练模式默认不消耗/不改变资源使用状态：使用 peek（只读预览）选择资源；
         // 若开启「演练测试环境」，则按正常任务选择（记录使用状态与次数）。
@@ -125,22 +158,47 @@ export class TaskService {
       throw new Error(`没有可执行的主体：${items.map((item) => item.pickError).filter(Boolean)[0] || '资源池为空'}`);
     }
 
+    // 计算每条计划的定时发表/定时执行时间
+    if (scheduleKind === 'publish') {
+      const scope = configScheduled.intervalScope === 'task' ? 'task' : 'subject';
+      let globalIndex = 0;
+      const subjectIndex = new Map();
+      for (const item of items) {
+        const index = scope === 'task' ? globalIndex++ : (subjectIndex.get(item.subject.id) || 0);
+        if (scope !== 'task') subjectIndex.set(item.subject.id, index + 1);
+        if (item.pickError) continue;
+        item.scheduledAt = new Date(scheduleBaseMs + index * scheduleIntervalMinutes * 60_000).toISOString();
+        if (Date.parse(item.scheduledAt) <= Date.now() + 30_000) {
+          throw new Error('定时发表时间已过，请修改配置中的定时发表起点/间隔，或关闭定时发表');
+        }
+      }
+    } else if (scheduleKind === 'run') {
+      let index = 0;
+      for (const item of items) {
+        if (item.pickError) continue;
+        item.scheduledAt = new Date(scheduleBaseMs + index * scheduleIntervalMinutes * 60_000).toISOString();
+        index += 1;
+      }
+    }
+    const taskScheduledAt = scheduleKind ? new Date(scheduleBaseMs).toISOString() : null;
+
     db().transaction(() => {
       db().run(
-        `INSERT INTO tasks (id, name, config_id, config_json, action, dry_run, status, total, skipped, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
+        `INSERT INTO tasks (id, name, config_id, config_json, action, dry_run, status, total, skipped, created_at,
+                            scheduled_at, schedule_interval_minutes, schedule_kind)
+         VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)`,
         id, name, configId, JSON.stringify(config), config.action, dryRun ? 1 : 0,
-        runnable.length, skipped, now,
+        runnable.length, skipped, now, taskScheduledAt, scheduleIntervalMinutes || null, scheduleKind,
       );
       items.forEach((item, index) => {
         db().run(
           `INSERT INTO task_items (id, task_id, seq, subject_id, subject_name, video_id, video_name, text_id, text_preview,
-                                  status, error)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                                  status, error, scheduled_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           item.id, id, index + 1, item.subject.id, item.subject.name,
           item.video?.id || null, item.video?.name || null,
           item.text?.id || null, item.text ? truncate(item.text.content, 120) : null,
-          item.pickError ? 'skipped' : 'pending', item.pickError,
+          item.pickError ? 'skipped' : 'pending', item.pickError, item.scheduledAt,
         );
       });
     });
@@ -171,6 +229,9 @@ export class TaskService {
       unknownCount: Number(row.unknown_count || 0),
       syncStatus: row.sync_status || '',
       syncError: row.sync_error || '',
+      scheduledAt: row.scheduled_at || null,
+      scheduleIntervalMinutes: row.schedule_interval_minutes ? Number(row.schedule_interval_minutes) : null,
+      scheduleKind: row.schedule_kind || null,
       createdAt: row.created_at,
       startedAt: row.started_at,
       finishedAt: row.finished_at,
@@ -196,6 +257,7 @@ export class TaskService {
       logs: parseJson(item.logs_json, []),
       screenshot: item.screenshot || '',
       postId: item.post_id || '',
+      scheduledAt: item.scheduled_at || null,
       startedAt: item.started_at,
       finishedAt: item.finished_at,
     }));
@@ -208,17 +270,19 @@ export class TaskService {
     };
   }
 
-  start(id) {
+  start(id, { scheduled = false } = {}) {
     const task = this.detail(id);
     if (!task) throw new Error('任务不存在');
     if (!ACTIVE.has(task.status)) throw new Error('该任务已结束，无法重复执行');
     if (this.runningTaskId === id) return task;
     if (this.runningTaskId) {
       if (!this.queue.includes(id)) this.queue.push(id);
+      this.startOptions.set(id, { scheduled });
       return this.detail(id);
     }
     this.runningTaskId = id;
-    this.run(id).catch((error) => {
+    this.startOptions.delete(id);
+    this.run(id, { honorSchedule: scheduled && task.scheduleKind === 'run' }).catch((error) => {
       db().run('UPDATE tasks SET status = ?, finished_at = ? WHERE id = ?', 'failed', nowIso(), id);
       console.error('[task] 执行异常', error);
     }).finally(() => {
@@ -226,10 +290,37 @@ export class TaskService {
       const next = this.queue.shift();
       if (next) {
         this.runningTaskId = next;
-        this.run(next).finally(() => { this.runningTaskId = null; });
+        const options = this.startOptions.get(next) || {};
+        this.startOptions.delete(next);
+        const nextTask = this.detail(next);
+        this.run(next, { honorSchedule: Boolean(options.scheduled) && nextTask?.scheduleKind === 'run' }).finally(() => { this.runningTaskId = null; });
       }
     });
     return this.detail(id);
+  }
+
+  /** 定时执行：每 10 秒检查一次到点的定时任务并自动开始 */
+  startScheduler(intervalMs = 10_000) {
+    if (this.schedulerTimer) return;
+    this.schedulerTimer = setInterval(() => {
+      try { this.startDueScheduled(); } catch (error) { console.error('[task] 定时任务检查失败', error); }
+    }, intervalMs);
+    this.schedulerTimer.unref?.();
+  }
+
+  startDueScheduled() {
+    const rows = db().all(
+      "SELECT id FROM tasks WHERE status = 'pending' AND schedule_kind = 'run' AND scheduled_at IS NOT NULL AND scheduled_at <= ?",
+      nowIso(),
+    );
+    for (const row of rows) {
+      try {
+        this.start(row.id, { scheduled: true });
+        console.log(`[task] 定时任务到点自动开始：${row.id}`);
+      } catch (error) {
+        console.error('[task] 自动开始定时任务失败', row.id, error);
+      }
+    }
   }
 
   cancel(id) {
@@ -247,7 +338,7 @@ export class TaskService {
     return this.detail(id);
   }
 
-  async run(taskId) {
+  async run(taskId, { honorSchedule = false } = {}) {
     const task = this.detail(taskId);
     if (!task) return;
     db().run('UPDATE tasks SET status = ?, started_at = COALESCE(started_at, ?) WHERE id = ?', 'running', nowIso(), taskId);
@@ -256,6 +347,8 @@ export class TaskService {
     const config = { ...this.configs.get(task.configId)?.config, ...(configRecord || {}) };
     config.action = task.action;
     const dryRun = task.dryRun;
+    let warmupSubjectId = null;
+    let warmupLogs = [];
 
     for (const item of items) {
       if (this.cancelRequested.has(taskId)) {
@@ -265,17 +358,69 @@ export class TaskService {
         );
         continue;
       }
-      await this.runItem(taskId, item, config, dryRun);
+      // 先传输完素材再逐一搭建：对同一主体的所有计划先统一「上传→删除」预热
+      if (config.pageOptions?.preUploadAll?.enabled && item.subject_id !== warmupSubjectId) {
+        warmupSubjectId = item.subject_id;
+        const groupItems = items.filter((entry) => entry.subject_id === item.subject_id);
+        warmupLogs = await this.warmUpSubject(task, item.subject_id, groupItems, config);
+      }
+      if (honorSchedule && item.scheduled_at) {
+        await this.waitUntilScheduled(taskId, item.scheduled_at);
+        if (this.cancelRequested.has(taskId)) {
+          db().run("UPDATE task_items SET status = 'cancelled', finished_at = ? WHERE id = ?", nowIso(), item.id);
+          continue;
+        }
+      }
+      // 配置级定时发布：每条计划使用自己的定时时间
+      let itemConfig = config;
+      if (task.scheduleKind === 'publish' && item.scheduled_at) {
+        itemConfig = {
+          ...config,
+          pageOptions: {
+            ...config.pageOptions,
+            scheduled: { ...(config.pageOptions.scheduled || {}), enabled: true, value: item.scheduled_at },
+          },
+        };
+      }
+      await this.runItem(taskId, item, itemConfig, dryRun, warmupLogs);
+      warmupLogs = [];
     }
     this.cancelRequested.delete(taskId);
     this.finalize(taskId);
     await this.syncWechat(taskId);
   }
 
-  async runItem(taskId, item, config, dryRun) {
+  async waitUntilScheduled(taskId, iso) {
+    const target = Date.parse(iso);
+    if (!Number.isFinite(target)) return;
+    while (Date.now() < target) {
+      if (this.cancelRequested.has(taskId)) return;
+      await sleep(Math.min(1000, Math.max(50, target - Date.now())));
+    }
+  }
+
+  async warmUpSubject(task, subjectId, groupItems, config) {
+    const videos = groupItems.map((item) => this.dbVideo(item.video_id)).filter(Boolean);
+    if (!videos.length) return [];
+    const logs = [];
+    const push = (step, message) => logs.push({ t: new Date().toISOString().slice(11, 19), step, message: truncate(message, 300) });
+    push('warmup', `开始素材预热：${videos.length} 个视频（先上传再删除，之后逐一搭建）`);
+    try {
+      const result = await this.publisher.warmUpVideos(subjectId, videos, {
+        onProgress: (payload) => { if (payload?.message) push(payload.step || 'warmup', payload.message); },
+      });
+      for (const warning of result?.warnings || []) push('warn', warning);
+      push('warmup', `素材预热完成：已上传并删除 ${result?.uploaded || 0} 个视频`);
+    } catch (error) {
+      push('warn', `素材预热失败：${error?.message || error}`);
+    }
+    return logs.slice(-120);
+  }
+
+  async runItem(taskId, item, config, dryRun, preLogs = []) {
     const itemId = item.id;
     const startedAt = nowIso();
-    const logs = [];
+    const logs = Array.isArray(preLogs) ? [...preLogs] : [];
     let lastPersist = 0;
     const persist = (patch = {}) => {
       db().run(

@@ -206,6 +206,8 @@ async function main() {
     } else {
       fail('仍存在已废弃的短标题/原创选项');
     }
+    if (await page.locator('.modal-body [data-preupload-enabled]').count() === 1) ok('页面选项顶部提供「先传输完素材，再逐一搭建」'); else fail('缺少先传后搭选项');
+    if (await page.locator('.modal-body [data-schedule-interval]').count() === 1 && await page.locator('.modal-body [data-schedule-scope]').count() === 1) ok('定时发表提供间隔与作用范围'); else fail('缺少定时间隔/作用范围');
     const optionTexts = (await page.locator('.modal-body .page-option').allInnerTexts()).map((text) => text.replace(/\s+/g, ' ').trim());
     const optionIndex = (keyword) => optionTexts.findIndex((text) => text.includes(keyword));
     const ordered = ['视频描述', '短标题', '设置位置', '添加到合集', '链接', '定时发表', '视频标注'];
@@ -252,12 +254,59 @@ async function main() {
     await page.locator('.card:has-text("UI 测试配置")').first().locator('button:has-text("复制")').click();
     await waitFor(async () => (await page.locator('.card[data-config]').count()) === cardCountBeforeCopy + 1, { timeout: 8000, label: '复制配置' });
     ok('配置复制按钮可用（复制全部配置内容）');
+    // 配置启用定时发表后：任务级定时执行应灰置并提示原因
+    const configsNow = await api('/configs');
+    const uiConfig = configsNow.find((item) => item.name === 'UI 测试配置');
+    await api(`/configs/${uiConfig.id}`, {
+      method: 'PUT',
+      body: {
+        name: uiConfig.name,
+        config: {
+          ...uiConfig.config,
+          pageOptions: {
+            ...uiConfig.config.pageOptions,
+            scheduled: { enabled: true, value: new Date(Date.now() + 3600_000).toISOString(), intervalMinutes: 10, intervalScope: 'subject' },
+          },
+        },
+      },
+    });
+    await go(page, '/configs');
+    const scheduledAgain = (await api('/configs')).find((item) => item.id === uiConfig.id);
+    if (scheduledAgain?.config?.pageOptions?.scheduled?.enabled) ok('配置定时发表已启用'); else fail('配置定时发表未保存');
+    await page.reload({ waitUntil: 'networkidle' }).catch(() => undefined);
+    await page.waitForTimeout(900);
+    await page.locator(`.card[data-config="${uiConfig.id}"]`).locator('button:has-text("创建任务")').click();
+    await page.waitForSelector('.modal-overlay');
+    if (await page.locator('.modal-body [data-task-schedule]').isDisabled()) ok('配置已启用定时发表时任务定时执行灰置'); else fail('任务定时执行未灰置');
+    if ((await page.locator('.modal-body').innerText()).includes('已启用定时发表')) ok('灰置时提示原因'); else fail('灰置时缺少原因提示');
+    await page.locator('.modal-close').click();
+    await page.waitForTimeout(400);
+    await api(`/configs/${uiConfig.id}`, {
+      method: 'PUT',
+      body: {
+        name: uiConfig.name,
+        config: {
+          ...uiConfig.config,
+          pageOptions: {
+            ...uiConfig.config.pageOptions,
+            scheduled: { enabled: false, value: null, intervalMinutes: 10, intervalScope: 'subject' },
+          },
+        },
+      },
+    });
+    await page.reload({ waitUntil: 'networkidle' }).catch(() => undefined);
+    await page.waitForTimeout(900);
 
     step('发布配置：创建任务');
     const configCard = page.locator('.card:has-text("UI 测试配置")').first();
     await configCard.locator('button:has-text("创建任务")').click();
     await page.waitForSelector('.modal-overlay');
     await page.locator('.modal-body [data-dry]').check();
+    if (await page.locator('.modal-body [data-start]').isChecked()) ok('创建任务默认「创建后立即开始执行」'); else fail('未默认立即开始执行');
+    await page.locator('.modal-body [data-task-schedule]').check();
+    if (await page.locator('.modal-body [data-task-schedule-fields]').isVisible()) ok('勾选定时执行后显示起点/间隔'); else fail('定时执行字段未显示');
+    if (await page.locator('.modal-body [data-start]').isDisabled()) ok('定时执行时立即开始执行被禁用'); else fail('定时执行与立即开始未互斥');
+    await page.locator('.modal-body [data-task-schedule]').uncheck();
     await page.locator('.modal-body [data-start]').uncheck();
     await page.locator('.modal-foot button:has-text("创建任务")').click();
     await page.waitForTimeout(1500);

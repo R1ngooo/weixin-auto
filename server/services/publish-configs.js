@@ -6,6 +6,9 @@ const db = () => getDb();
 export const STRATEGIES = ['random', 'random-unique', 'fixed'];
 export const UPLOAD_FILTERS = ['', 'yes', 'no'];
 export const PER_SUBJECT_VIDEO_LIMIT = 5;
+export const SCHEDULE_MIN_LEAD_MS = 10 * 60_000;
+export const SCHEDULE_INTERVAL_MIN = 1;
+export const SCHEDULE_INTERVAL_MAX = 1440;
 
 function toInt(value, fallback = 0) {
   const n = Number.parseInt(value, 10);
@@ -54,12 +57,14 @@ export function defaultConfig() {
       requireUploaded: 'no',
     },
     pageOptions: {
+      // 新闻：先上传再删除全部素材，之后再逐个搭建发布信息
+      preUploadAll: { enabled: false },
       description: { enabled: true, prefix: '', suffix: '', hashtags: [] },
       shortTitle: { enabled: false, value: '' },
       location: { enabled: false, value: '' },
       collection: { enabled: false, value: '' },
       videoMark: { enabled: false, value: '无需标注' },
-      scheduled: { enabled: false, value: null },
+      scheduled: { enabled: false, value: null, intervalMinutes: 10, intervalScope: 'subject' },
       // 页面上的「链接」，可填商品链接或商品ID（保留 extLink 字段兼容旧配置）
       extLink: { enabled: false, value: '' },
     },
@@ -113,9 +118,14 @@ export function normalizeConfig(input = {}) {
     enabled: Boolean(pageOptions.shortTitle?.enabled),
     value: String(pageOptions.shortTitle?.value || ''),
   };
+  pageOptions.preUploadAll = {
+    enabled: Boolean(pageOptions.preUploadAll?.enabled),
+  };
   pageOptions.scheduled = {
     enabled: Boolean(pageOptions.scheduled?.enabled),
     value: pageOptions.scheduled?.value || null,
+    intervalMinutes: Math.max(SCHEDULE_INTERVAL_MIN, Math.min(SCHEDULE_INTERVAL_MAX, toInt(pageOptions.scheduled?.intervalMinutes, 10))),
+    intervalScope: pageOptions.scheduled?.intervalScope === 'task' ? 'task' : 'subject',
   };
 
   const out = {
@@ -217,7 +227,7 @@ export class PublishConfigService {
   }
 
   /** 校验配置是否可保存/执行；返回规范化后的配置 */
-  validateConfig(input = {}) {
+  validateConfig(input = {}, { enforceScheduleLead = true } = {}) {
     const config = normalizeConfig(input);
     const page = config.pageOptions;
 
@@ -232,7 +242,12 @@ export class PublishConfigService {
     if (page.scheduled.enabled) {
       const time = Date.parse(page.scheduled.value);
       if (!Number.isFinite(time)) throw new Error('请选择定时发表时间');
-      if (time < Date.now() - 60_000) throw new Error('定时发表时间不能早于当前时间');
+      if (enforceScheduleLead && time < Date.now() + SCHEDULE_MIN_LEAD_MS - 30_000) {
+        throw new Error('定时发表起点需晚于当前时间至少 10 分钟（容错）');
+      }
+      if (!Number.isInteger(page.scheduled.intervalMinutes) || page.scheduled.intervalMinutes < SCHEDULE_INTERVAL_MIN) {
+        throw new Error(`定时发表间隔需为不少于 ${SCHEDULE_INTERVAL_MIN} 分钟的整数`);
+      }
     }
     if (page.extLink.enabled && !String(page.extLink.value || '').trim()) {
       throw new Error('勾选「链接」后，请填写商品链接或商品ID');

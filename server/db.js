@@ -223,6 +223,11 @@ export class Db {
     this.ensureColumn('videos', 'removed_at', 'TEXT');
     this.ensureColumn('video_folders', 'tag_ids', 'TEXT');
     this.ensureColumn('tags', 'group_id', 'INTEGER');
+    // 定时发布 / 定时执行：任务级定时与每条计划的执行/发布时间
+    this.ensureColumn('tasks', 'scheduled_at', 'TEXT');
+    this.ensureColumn('tasks', 'schedule_interval_minutes', 'INTEGER');
+    this.ensureColumn('tasks', 'schedule_kind', 'TEXT');
+    this.ensureColumn('task_items', 'scheduled_at', 'TEXT');
     this.migrateTagGroups();
   }
 

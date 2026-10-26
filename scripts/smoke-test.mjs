@@ -488,12 +488,12 @@ async function main() {
       return '空值/过短被拒绝，6-16 字可保存';
     });
 
-    await check('发表选项：定时校验与废弃字段清理', async () => {
+    await check('定时发表：起点+10分钟、间隔、作用范围与废弃字段清理', async () => {
       const base = {
         name: '定时校验配置',
         resourceTags: [state.videoTag, state.textTag],
         subjectSelection: { mode: 'ids', ids: [state.subject.id] },
-        videoSelection: { strategy: 'random', requireUploaded: '' },
+        videoSelection: { strategy: 'random', requireUploaded: '', perSubjectCount: 3 },
         textSelection: { strategy: 'random', requireUploaded: '' },
         pool: { allowReset: false },
       };
@@ -501,25 +501,108 @@ async function main() {
       try {
         await api('/configs', {
           method: 'POST',
-          body: { name: '定时校验配置', config: { ...base, pageOptions: { scheduled: { enabled: true, value: new Date(Date.now() - 3600_000).toISOString() } } } },
+          body: { name: '定时校验配置', config: { ...base, pageOptions: { scheduled: { enabled: true, value: new Date(Date.now() - 3600_000).toISOString(), intervalMinutes: 10 } } } },
         });
       } catch (error) { pastError = error.message; }
-      assert(/不能早于当前时间/.test(pastError), `过去的定时时间应被拒绝，实际：${pastError}`);
-      const future = new Date(Date.now() + 3600_000).toISOString();
-      const saved = await api('/configs', {
+      assert(/至少 10 分钟/.test(pastError), `过去的定时时间应被拒绝，实际：${pastError}`);
+      let nearError = '';
+      try {
+        await api('/configs', {
+          method: 'POST',
+          body: { name: '定时校验配置', config: { ...base, pageOptions: { scheduled: { enabled: true, value: new Date(Date.now() + 5 * 60_000).toISOString(), intervalMinutes: 10 } } } },
+        });
+      } catch (error) { nearError = error.message; }
+      assert(/至少 10 分钟/.test(nearError), `不足 10 分钟的定时起点应被拒绝，实际：${nearError}`);
+      const future = new Date(Date.now() + 30 * 60_000).toISOString();
+      const scheduled = await api('/configs', {
         method: 'POST',
         body: {
           name: '定时校验配置',
           config: {
             ...base,
-            pageOptions: { scheduled: { enabled: true, value: future }, original: { enabled: true }, shortTitle: { enabled: false, fromVideoName: true, value: '旧值' } },
+            pageOptions: {
+              preUploadAll: { enabled: true },
+              scheduled: { enabled: true, value: future, intervalMinutes: 10, intervalScope: 'subject' },
+              original: { enabled: true },
+              shortTitle: { enabled: false, fromVideoName: true, value: '旧值' },
+            },
           },
         },
       });
-      assert(saved.config.pageOptions.scheduled.value, '未来时间的定时发表应保存成功');
-      assert(!('original' in saved.config.pageOptions), '旧配置中的声明原创应被清理');
-      assert(!('fromVideoName' in saved.config.pageOptions.shortTitle), '旧配置中的使用视频文件名应被清理');
-      return '过去时间拒绝，未来时间可保存，废弃字段已清理';
+      state.scheduledConfig = scheduled;
+      assert(scheduled.config.pageOptions.scheduled.value, '未来时间的定时发表应保存成功');
+      assert(scheduled.config.pageOptions.scheduled.intervalMinutes === 10, '定时间隔应保存');
+      assert(scheduled.config.pageOptions.scheduled.intervalScope === 'subject', '默认间隔作用范围应为按主体');
+      assert(scheduled.config.pageOptions.preUploadAll.enabled === true, '先传后搭选项应保存');
+      assert(!('original' in scheduled.config.pageOptions), '旧配置中的声明原创应被清理');
+      assert(!('fromVideoName' in scheduled.config.pageOptions.shortTitle), '旧配置中的使用视频文件名应被清理');
+      // 配置级定时发布：每条计划时间 = 起点 + 间隔 × 序号（按主体范围）
+      const task = await api('/tasks', { method: 'POST', body: { configId: scheduled.id, overrides: { dryRun: true } } });
+      const taskDetail = await api(`/tasks/${task.id}`);
+      assert(taskDetail.scheduleKind === 'publish', '任务应标记为配置级定时发表');
+      assert(taskDetail.items.length === 3, `应生成 3 条计划，实际 ${taskDetail.items.length}`);
+      const times = taskDetail.items.map((item) => new Date(item.scheduledAt).getTime());
+      assert(times[1] - times[0] === 10 * 60_000, '第 2 条计划应比第 1 条晚 10 分钟');
+      assert(times[2] - times[1] === 10 * 60_000, '第 3 条计划应比第 2 条晚 10 分钟');
+      await api(`/tasks/${task.id}/cancel`, { method: 'POST', body: {} });
+      return '过去/不足10分钟拒绝，间隔与作用范围生效，废弃字段已清理';
+    });
+
+    await check('任务级定时执行与互斥校验', async () => {
+      const future = new Date(Date.now() + 30 * 60_000).toISOString();
+      let nearError = '';
+      try {
+        await api('/tasks', {
+          method: 'POST',
+          body: { configId: state.config.id, overrides: { dryRun: true, schedule: { enabled: true, value: new Date(Date.now() + 5 * 60_000).toISOString(), intervalMinutes: 5 } } },
+        });
+      } catch (error) { nearError = error.message; }
+      assert(/至少 10 分钟/.test(nearError), `任务级定时不足 10 分钟应被拒绝，实际：${nearError}`);
+      const task = await api('/tasks', {
+        method: 'POST',
+        body: {
+          configId: state.config.id,
+          overrides: { dryRun: true, perSubjectCount: 2, schedule: { enabled: true, value: future, intervalMinutes: 5 } },
+        },
+      });
+      const detail = await api(`/tasks/${task.id}`);
+      assert(detail.status === 'pending', '定时执行任务创建后应为待执行');
+      assert(detail.scheduleKind === 'run', '任务应标记为定时执行');
+      assert(detail.scheduledAt, '任务应保存定时执行起点');
+      assert(detail.items.length === 2, '应生成 2 条计划');
+      const times = detail.items.map((item) => new Date(item.scheduledAt).getTime());
+      assert(times[1] - times[0] === 5 * 60_000, '任务级定时执行相邻计划应间隔 5 分钟');
+      // 已有配置级定时发表时，任务级定时执行应被拒绝
+      let conflictError = '';
+      try {
+        await api('/tasks', {
+          method: 'POST',
+          body: { configId: state.scheduledConfig.id, overrides: { dryRun: true, schedule: { enabled: true, value: future, intervalMinutes: 5 } } },
+        });
+      } catch (error) { conflictError = error.message; }
+      assert(/已启用定时发表/.test(conflictError), `配置已定时发表时应拒绝任务级定时，实际：${conflictError}`);
+      await api(`/tasks/${task.id}/cancel`, { method: 'POST', body: {} });
+      return '10分钟限制、待执行状态、间隔与配置级定时互斥均通过';
+    });
+
+    await check('定时任务到点自动开始', async () => {
+      const future = new Date(Date.now() + 30 * 60_000).toISOString();
+      const task = await api('/tasks', {
+        method: 'POST',
+        body: { configId: state.config.id, overrides: { dryRun: true, schedule: { enabled: true, value: future, intervalMinutes: 5 } } },
+      });
+      await withDb((db) => {
+        const past = new Date(Date.now() - 2000).toISOString();
+        db.prepare('UPDATE tasks SET scheduled_at = ? WHERE id = ?').run(past, task.id);
+        db.prepare('UPDATE task_items SET scheduled_at = ? WHERE task_id = ?').run(past, task.id);
+      });
+      const started = await waitFor(async () => {
+        const detail = await api(`/tasks/${task.id}`);
+        return ['running', 'failed', 'success', 'partial', 'cancelled'].includes(detail.status) ? detail : null;
+      }, { timeout: 30_000, interval: 1000, label: '定时任务自动开始' });
+      assert(['running', 'failed', 'success', 'partial', 'cancelled'].includes(started.status), `定时任务应自动开始，实际 ${started.status}`);
+      await api(`/tasks/${task.id}/cancel`, { method: 'POST', body: {} }).catch(() => undefined);
+      return `定时任务已自动开始（${started.status}）`;
     });
 
     await check('链接商品ID解析与必填校验', async () => {

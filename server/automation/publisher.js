@@ -598,6 +598,66 @@ export function createPublisher({ browser, getSettings, getSelectors, subjects }
     return { ok: true, productId: searchId, productText: linkText.replace(/\s+/g, ' ').slice(0, 120) };
   }
 
+  async function deleteUploadedVideo(page, onProgress) {
+    const sel = getSelectors().publish;
+    onProgress?.({ step: 'warmup', message: '删除预热上传的视频' });
+    let button = null;
+    for (const text of sel.uploadDeleteButtonTexts || ['删除']) {
+      button = await findButton(page, [text], { timeout: 2500 });
+      if (button) break;
+    }
+    if (!button) {
+      const fallback = page.locator('.media-opr [class*="delete"], .post-upload-wrap [class*="delete"], .upload-wrap [class*="delete"]').first();
+      if (await fallback.count().catch(() => 0) && await fallback.isVisible().catch(() => false)) button = fallback;
+    }
+    if (!button) return { ok: false, reason: '未找到删除上传视频按钮' };
+    await button.click({ timeout: 5000 }).catch(() => undefined);
+    await sleep(600);
+    // 删除确认弹窗：优先在可见弹窗内点确定/确认/删除，避免误点页面其他「删除」
+    const dialogs = page.locator('.weui-desktop-dialog__wrp').filter({ hasText: /确定|确认|删除/ });
+    let confirm = null;
+    for (const text of sel.uploadDeleteConfirmTexts || ['确定', '确认', '删除']) {
+      const candidate = dialogs.last().locator('button').filter({ hasText: text }).first();
+      if (await candidate.count().catch(() => 0) && await candidate.isVisible().catch(() => false)) {
+        confirm = candidate;
+        break;
+      }
+    }
+    if (confirm) {
+      await confirm.click({ timeout: 4000 }).catch(() => undefined);
+      await sleep(800);
+    }
+    await sleep(500);
+    return { ok: true };
+  }
+
+  /**
+   * 先传输完素材、再逐一搭建的预热阶段：
+   * 对每个视频执行「上传 → 删除」，全部循环完后由正式搭建阶段重新上传（命中秒传缓存）。
+   */
+  async function warmUpVideos(subjectId, videos, { onProgress } = {}) {
+    const list = (videos || []).filter((video) => video?.path);
+    if (!list.length) return { ok: true, uploaded: 0, warnings: [] };
+    return browser.run(subjectId, async ({ page }) => {
+      const warnings = [];
+      for (let index = 0; index < list.length; index += 1) {
+        const video = list[index];
+        onProgress?.({ step: 'warmup', message: `预热上传 ${index + 1}/${list.length}：${truncate(video.name, 40)}` });
+        try {
+          await gotoCreate(page);
+          await uploadVideo(page, video.path, (payload) => onProgress?.({ step: 'warmup', message: payload?.message || '' }), null);
+          await delay(page, 500);
+          const deleted = await deleteUploadedVideo(page, onProgress);
+          if (!deleted.ok) warnings.push(`预热视频「${video.name}」删除失败：${deleted.reason}`);
+          await sleep(400);
+        } catch (error) {
+          warnings.push(`预热视频「${video.name}」失败：${error?.message || error}`);
+        }
+      }
+      return { ok: warnings.length === 0, uploaded: list.length, warnings };
+    });
+  }
+
   async function waitForSubmitEnabled(page, texts, timeout = 120_000) {
     const deadline = Date.now() + timeout;
     while (Date.now() < deadline) {
@@ -1047,5 +1107,5 @@ export function createPublisher({ browser, getSettings, getSelectors, subjects }
     });
   }
 
-  return { runItem, probePage, deepProbe, gotoCreate, findEditor, saveScreenshot };
+  return { runItem, warmUpVideos, probePage, deepProbe, gotoCreate, findEditor, saveScreenshot };
 }

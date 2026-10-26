@@ -72,6 +72,7 @@ async function main() {
   const session = createSessionService({ browser, subjects, getSelectors });
   const publisher = createPublisher({ browser, getSettings, getSelectors, subjects });
   const tasks = new TaskService({ picker, subjects, configs, publisher, wechat });
+  tasks.startScheduler();
 
   const app = express();
   app.disable('x-powered-by');

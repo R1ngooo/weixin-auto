@@ -121,6 +121,7 @@ export const configsPage = {
     function pageOptionSummary(cfg) {
       const options = cfg.pageOptions || {};
       const parts = [];
+      if (options.preUploadAll?.enabled) parts.push('先传后搭');
       if (options.description?.enabled) {
         parts.push('视频描述');
         if (options.description?.prefix) parts.push('描述前缀');
@@ -131,7 +132,10 @@ export const configsPage = {
       if (options.location?.enabled) parts.push('位置');
       if (options.collection?.enabled) parts.push('合集');
       if (options.extLink?.enabled) parts.push(`链接${options.extLink.value ? `：${String(options.extLink.value).slice(0, 24)}` : ''}`);
-      if (options.scheduled?.enabled) parts.push('定时发表');
+      if (options.scheduled?.enabled) {
+        const scopeText = options.scheduled.intervalScope === 'task' ? '整个任务连续' : '按主体分别';
+        parts.push(`定时发表（间隔 ${options.scheduled.intervalMinutes || 10} 分钟，${scopeText}）`);
+      }
       if (options.videoMark?.enabled) parts.push(`视频标注：${options.videoMark.value || '无需标注'}`);
       return parts.length ? parts.join(' · ') : '仅上传视频 + 描述';
     }
@@ -219,6 +223,7 @@ export const configsPage = {
         subjectCount = resolved.length;
       } catch { /* ignore */ }
       const defaultCount = Math.max(1, Math.min(5, Number(config.config.videoSelection?.perSubjectCount || 1)));
+      const configScheduleEnabled = Boolean(config.config.pageOptions?.scheduled?.enabled);
       const dialog = modal({
         title: `创建执行任务：${config.name}`,
         body: `
@@ -239,7 +244,20 @@ export const configsPage = {
               <label class="field span-2"><span>任务名称（可选）</span><input type="text" data-name placeholder="默认使用配置名 + 时间"></label>
             </div>
             <div class="help-text" data-total-hint></div>
-            <label class="check"><input type="checkbox" data-start checked> 创建后立即开始执行</label>
+            <div class="divider" style="margin:4px 0"></div>
+            <div class="page-option">
+              <div class="small" style="font-weight:600;margin-bottom:8px">开始方式</div>
+              <label class="check"><input type="checkbox" data-start checked> 创建后立即开始执行（默认）</label>
+              <label class="check" ${configScheduleEnabled ? 'title="发布配置已启用定时发表，任务内不能再设置定时执行"' : ''}><input type="checkbox" data-task-schedule ${configScheduleEnabled ? 'disabled' : ''}> 定时执行</label>
+              <div class="mt-8" data-task-schedule-fields style="display:none;margin-left:22px">
+                <div class="form-grid">
+                  <label class="field"><span>定时执行起点</span><input type="datetime-local" data-task-schedule-value step="60"></label>
+                  <label class="field"><span>执行间隔（分钟）</span><input type="number" min="1" max="1440" step="1" data-task-schedule-interval value="10"></label>
+                </div>
+                <div class="help-text">任务将在定时起点自动开始，各计划按间隔依次执行；起点需晚于当前时间至少 10 分钟（容错）。</div>
+              </div>
+              ${configScheduleEnabled ? '<div class="help-text">发布配置已启用定时发表，任务内「定时执行」不可用（避免重复定时）。</div>' : ''}
+            </div>
             <div class="help-text">执行过程中可在「执行记录」查看每一步日志与截图；微信结果同步取决于发布配置与「执行记录 → 微信机器人」设置。</div>
           </div>`,
         footer: '<button class="btn" data-close>取消</button><button class="btn primary" data-create>创建任务</button>',
@@ -247,6 +265,20 @@ export const configsPage = {
       const perSubjectInput = dialog.body.querySelector('[data-per-subject]');
       const limitInput = dialog.body.querySelector('[data-limit]');
       const totalHint = dialog.body.querySelector('[data-total-hint]');
+      const startInput = dialog.body.querySelector('[data-start]');
+      const scheduleInput = dialog.body.querySelector('[data-task-schedule]');
+      const scheduleFields = dialog.body.querySelector('[data-task-schedule-fields]');
+      const scheduleValueInput = dialog.body.querySelector('[data-task-schedule-value]');
+      const scheduleIntervalInput = dialog.body.querySelector('[data-task-schedule-interval]');
+      scheduleValueInput.min = toLocalInput(new Date(Date.now() + 10 * 60_000).toISOString());
+      const updateScheduleVisibility = () => {
+        const enabled = scheduleInput.checked && !scheduleInput.disabled;
+        scheduleFields.style.display = enabled ? 'block' : 'none';
+        startInput.disabled = enabled;
+        if (enabled) startInput.checked = false;
+        else if (!configScheduleEnabled) startInput.checked = true;
+      };
+      scheduleInput.addEventListener('change', updateScheduleVisibility);
       const updateTotalHint = () => {
         const perSubject = Math.max(1, Math.min(5, Number(perSubjectInput.value) || 1));
         const limit = Number(limitInput.value || 0);
@@ -263,21 +295,43 @@ export const configsPage = {
           toast('每个主体发表数量需为 1-5 个', 'warn');
           return;
         }
+        const scheduleEnabled = scheduleInput.checked && !scheduleInput.disabled;
+        let schedule = null;
+        if (scheduleEnabled) {
+          const raw = scheduleValueInput.value;
+          const target = raw ? new Date(raw) : null;
+          if (!target || Number.isNaN(target.getTime())) {
+            toast('请选择定时执行起点', 'warn');
+            return;
+          }
+          if (target.getTime() < Date.now() + 10 * 60_000 - 30_000) {
+            toast('定时执行起点需晚于当前时间至少 10 分钟（容错）', 'warn');
+            return;
+          }
+          const interval = Number(scheduleIntervalInput.value);
+          if (!Number.isInteger(interval) || interval < 1) {
+            toast('执行间隔需为不少于 1 分钟的整数', 'warn');
+            return;
+          }
+          schedule = { enabled: true, value: target.toISOString(), intervalMinutes: interval };
+        }
         const overrides = {
           dryRun: dialog.body.querySelector('[data-dry]').checked,
           subjectLimit: Number(dialog.body.querySelector('[data-limit]').value || 0),
           perSubjectCount,
           name: dialog.body.querySelector('[data-name]').value.trim() || undefined,
+          schedule: schedule || { enabled: false },
         };
         if (actionValue !== 'config') overrides.action = actionValue;
         try {
           const task = await api.createTask({ configId: config.id, overrides });
-          if (dialog.body.querySelector('[data-start]').checked) {
+          if (!schedule && startInput.checked) {
             await api.startTask(task.id);
           }
           dialog.close();
           location.hash = '/tasks';
-          toast(`任务已创建（${task.total} 项${task.skipped ? `，跳过 ${task.skipped}` : ''}）`, 'success', 4000);
+          const suffix = schedule ? `，将于 ${fmtDate(schedule.value, true)} 自动开始` : '';
+          toast(`任务已创建（${task.total} 项${task.skipped ? `，跳过 ${task.skipped}` : ''}）${suffix}`, 'success', 5000);
         } catch (error) {
           toast(error.message, 'error', 6000);
         }
@@ -299,12 +353,13 @@ export const configsPage = {
         videoSelection: { tags: [], strategy: 'random-unique', fixedVideoIds: [], requireUploaded: 'no', perSubjectCount: 1 },
         textSelection: { tags: [], strategy: 'random-unique', fixedTextIds: [], requireUploaded: 'no' },
         pageOptions: {
+          preUploadAll: { enabled: false },
           description: { enabled: true, prefix: '', suffix: '', hashtags: [] },
           shortTitle: { enabled: false, value: '' },
           location: { enabled: false, value: '' },
           collection: { enabled: false, value: '' },
           videoMark: { enabled: false, value: '无需标注' },
-          scheduled: { enabled: false, value: null },
+          scheduled: { enabled: false, value: null, intervalMinutes: 10, intervalScope: 'subject' },
           extLink: { enabled: false, value: '' },
         },
         pool: { allowReset: false, scope: 'config' },
@@ -388,6 +443,11 @@ export const configsPage = {
               <div class="card-title">发表动态页面选项 <span class="hint">选项自上而下排列</span></div>
               <div class="card" style="background:var(--bg-soft)">
                 <div class="col" style="gap:14px">
+                  <div class="page-option" style="border:1px solid var(--border-soft);border-radius:10px;padding:10px 12px;background:var(--panel)">
+                    <label class="check"><input type="checkbox" data-preupload-enabled ${cfg.pageOptions.preUploadAll?.enabled ? 'checked' : ''}> 先传输完素材，再逐一搭建</label>
+                    <div class="help-text">勾选后执行顺序改为：对每个视频先「上传 → 删除」，全部素材都上传循环一遍后，再逐个重新上传（命中秒传缓存）并搭建发布信息。可减少短时间重复上传触发的人脸认证等繁琐操作。</div>
+                  </div>
+                  <div class="divider" style="margin:0"></div>
                   <div class="page-option">
                     <label class="check"><input type="checkbox" data-desc-enabled ${cfg.pageOptions.description.enabled ? 'checked' : ''}> 填写视频描述内容</label>
                     <div class="form-grid mt-8" data-desc-fields style="display:${cfg.pageOptions.description.enabled ? 'grid' : 'none'}">
@@ -434,8 +494,15 @@ export const configsPage = {
                       <label class="check"><input type="radio" name="schedule-mode" value="on" ${cfg.pageOptions.scheduled.enabled ? 'checked' : ''}> 定时</label>
                     </div>
                     <div class="mt-8" data-schedule-fields style="display:${cfg.pageOptions.scheduled.enabled ? 'block' : 'none'}">
-                      <input type="datetime-local" data-schedule-value step="60" value="${esc(toLocalInput(cfg.pageOptions.scheduled.value))}" style="max-width:320px">
-                      <div class="help-text">不能早于当前时间，时间精确到分钟。</div>
+                      <div class="form-grid">
+                        <label class="field"><span>定时起点</span><input type="datetime-local" data-schedule-value step="60" value="${esc(toLocalInput(cfg.pageOptions.scheduled.value))}"></label>
+                        <label class="field"><span>定时间隔（分钟）</span><input type="number" min="1" max="1440" step="1" data-schedule-interval value="${esc(cfg.pageOptions.scheduled.intervalMinutes || 10)}"></label>
+                        <label class="field span-2"><span>间隔作用范围</span><select data-schedule-scope>
+                          <option value="subject" ${cfg.pageOptions.scheduled.intervalScope !== 'task' ? 'selected' : ''}>按每个主体分别递增（默认）</option>
+                          <option value="task" ${cfg.pageOptions.scheduled.intervalScope === 'task' ? 'selected' : ''}>整个任务所有计划连续递增</option>
+                        </select></label>
+                      </div>
+                      <div class="help-text">定时起点需晚于当前时间至少 10 分钟（容错）；第 N 条计划时间 = 起点 + 间隔 ×（N-1），精确到分钟。</div>
                     </div>
                   </div>
                   <div class="divider" style="margin:0"></div>
@@ -575,7 +642,7 @@ export const configsPage = {
       });
       const scheduleInput = body.querySelector('[data-schedule-value]');
       const now = new Date();
-      scheduleInput.min = toLocalInput(new Date(now.getTime()).toISOString());
+      scheduleInput.min = toLocalInput(new Date(now.getTime() + 10 * 60_000).toISOString());
 
       function collect() {
         const subjectMode = body.querySelector('input[name="subject-mode"]:checked').value;
@@ -606,6 +673,7 @@ export const configsPage = {
             requireUploaded: body.querySelector('[data-text-uploaded]').value,
           },
           pageOptions: {
+            preUploadAll: { enabled: body.querySelector('[data-preupload-enabled]').checked },
             description: {
               enabled: body.querySelector('[data-desc-enabled]').checked,
               prefix: body.querySelector('[data-desc-prefix]').value,
@@ -619,7 +687,12 @@ export const configsPage = {
             location: { enabled: body.querySelector('[data-loc-enabled]').checked, value: body.querySelector('[data-loc-value]').value },
             collection: { enabled: body.querySelector('[data-coll-enabled]').checked, value: body.querySelector('[data-coll-value]').value },
             extLink: { enabled: body.querySelector('[data-extlink-enabled]').checked, value: body.querySelector('[data-extlink-value]').value },
-            scheduled: { enabled: scheduleMode === 'on', value: scheduleMode === 'on' && scheduledValue ? new Date(scheduledValue).toISOString() : null },
+            scheduled: {
+              enabled: scheduleMode === 'on',
+              value: scheduleMode === 'on' && scheduledValue ? new Date(scheduledValue).toISOString() : null,
+              intervalMinutes: Math.max(1, Number(body.querySelector('[data-schedule-interval]').value) || 10),
+              intervalScope: body.querySelector('[data-schedule-scope]').value,
+            },
             videoMark: {
               enabled: body.querySelector('[data-mark-enabled]').checked,
               value: body.querySelector('[data-mark-value]').value || '无需标注',
@@ -667,8 +740,13 @@ export const configsPage = {
             toast('请选择定时发表时间', 'warn');
             return false;
           }
-          if (scheduled.getTime() < Date.now() - 60_000) {
-            toast('定时发表时间不能早于当前时间（精确到分钟）', 'warn');
+          if (scheduled.getTime() < Date.now() + 10 * 60_000 - 30_000) {
+            toast('定时发表起点需晚于当前时间至少 10 分钟（容错）', 'warn');
+            return false;
+          }
+          const interval = Number(payload.pageOptions.scheduled.intervalMinutes);
+          if (!Number.isInteger(interval) || interval < 1) {
+            toast('定时间隔需为不少于 1 分钟的整数', 'warn');
             return false;
           }
         }

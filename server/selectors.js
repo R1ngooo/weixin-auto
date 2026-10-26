@@ -70,6 +70,8 @@ export const DEFAULT_SELECTORS = {
     uploadingTexts: ['取消上传', '上传中', '正在上传', '正在处理文件', '视频处理中', '封面生成中', '秒传'],
     uploadErrorTexts: ['网络出错，请重新上传', '上传失败', '秒传失败'],
     uploadProgressSelector: '.media-progress .upload-progress, .media-progress, [class*="upload-progress"]',
+    uploadDeleteButtonTexts: ['删除', '删除视频', '移除视频'],
+    uploadDeleteConfirmTexts: ['确定', '确认', '删除'],
     // 视频描述（wujie Shadow DOM 内是 div.input-editor[contenteditable][data-placeholder="添加描述"]）
     descFormItemLabel: '视频描述',
     descEditorSelectors: [
