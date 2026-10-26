@@ -83,7 +83,10 @@ function killTree(pid) {
     const nodeExe = path.join(appDir, 'runtime', 'node.exe');
     const logFile = path.join(tempRoot, 'app.log');
     const out = fs.openSync(logFile, 'w');
-    const child = spawn(nodeExe, [path.join(appDir, 'launcher.mjs')], {
+    // 直接验证用户双击的 start.cmd，覆盖批处理编码/语法问题
+    const launchCommand = process.platform === 'win32' ? 'cmd.exe' : nodeExe;
+    const launchArgs = process.platform === 'win32' ? ['/c', 'start.cmd'] : [path.join(appDir, 'launcher.mjs')];
+    const child = spawn(launchCommand, launchArgs, {
       cwd: appDir,
       env: {
         ...process.env,

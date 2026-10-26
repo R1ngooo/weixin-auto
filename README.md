@@ -371,7 +371,7 @@ npm run test:patch                      # 补丁应用/校验/回滚自检
 ## 13. Git 版本管理与开源仓库
 
 - 仓库：<https://github.com/R1ngooo/weixin-auto>（公开）
-- 分支：`main`；发布标签：`v<版本>`（如 `v0.2.0`）。
+- 分支：`main`；发布标签：`v<版本>`（如 `v0.2.1`）。
 - **不会入库**：`data/`（数据库、登录态、截图、封面、备份等含隐私/运行数据）、`node_modules/`、`dist/`、`runtime/`、测试隔离目录（`.smoke-data/`、`.ui-data/` 等）、日志与临时文件，详见 [.gitignore](.gitignore)。
 - 迁移代码时直接 `git clone` 后 `npm install` 即可；运行数据请通过「系统设置 → 配置导入/导出」迁移。
 - 发布新版本：同步修改 `package.json`/`version.json` → 运行测试 → 构建便携包/补丁 → `git commit` → `git tag vX.Y.Z` → 推送 `main` 与 tag。

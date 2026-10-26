@@ -1,39 +1,44 @@
 @echo off
-setlocal
+setlocal EnableExtensions
 cd /d "%~dp0"
 chcp 65001 >nul
 
-rem 便携包优先使用内置 runtime\node.exe，无需系统安装 Node.js
 set "NODE_CMD=node"
-if exist "%~dp0runtime\node.exe" set "NODE_CMD=%~dp0runtime\node.exe"
+set "USE_RUNTIME=0"
+if exist "%~dp0runtime\node.exe" (
+  set "NODE_CMD=%~dp0runtime\node.exe"
+  set "USE_RUNTIME=1"
+)
 
-if "%NODE_CMD%"=="node" (
+if "%USE_RUNTIME%"=="0" (
   where node >nul 2>nul
   if errorlevel 1 (
-    echo [错误] 未检测到 Node.js。请使用便携包中的 runtime\node.exe，或安装 Node.js 22 或更高版本：https://nodejs.org/
+    echo [ERROR] Node.js not found.
+    echo Install Node.js 22+ or use the portable package that contains runtime\node.exe.
     pause
     exit /b 1
   )
 )
 
-if not exist node_modules (
-  if exist "%~dp0runtime\node.exe" (
-    echo [错误] 便携包缺少 node_modules，请重新解压完整安装包。
+if not exist "%~dp0node_modules" (
+  if "%USE_RUNTIME%"=="1" (
+    echo [ERROR] node_modules is missing from this portable package.
+    echo Please extract the complete package again.
     pause
     exit /b 1
   )
-  echo 首次运行，正在安装依赖（约 1-2 分钟）...
+  echo First run: installing dependencies...
   call npm install --no-audit --no-fund
   if errorlevel 1 (
-    echo [错误] 依赖安装失败，请检查网络后重试。
+    echo [ERROR] npm install failed. Check the network and retry.
     pause
     exit /b 1
   )
 )
 
-echo 正在启动服务...
+echo Starting weixin-auto...
 "%NODE_CMD%" "%~dp0launcher.mjs"
 
 echo.
-echo 服务已停止。
+echo Service stopped.
 pause

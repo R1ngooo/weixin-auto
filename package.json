@@ -1,6 +1,6 @@
 {
   "name": "weixin-auto",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "视频号助手自动化上传工具：主体登录管理、视频池、文本池、发表动态自动化、标签分组、执行结果同步",
   "type": "module",

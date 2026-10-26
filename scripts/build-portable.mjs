@@ -75,6 +75,10 @@ async function main() {
     if (!fs.existsSync(path.join(ROOT, file))) continue;
     await fsp.copyFile(path.join(ROOT, file), path.join(stageDir, file));
   }
+  // start.cmd 必须保持纯 ASCII + CRLF：UTF-8 中文/非 ASCII 与 LF 都可能被 cmd.exe 错误解析
+  const startCmd = await fsp.readFile(path.join(ROOT, 'start.cmd'), 'utf8');
+  if (/[^\x00-\x7F]/.test(startCmd)) throw new Error('start.cmd 必须为纯 ASCII，不能包含中文/UTF-8 字符');
+  if (!startCmd.includes('\r\n')) throw new Error('start.cmd 必须使用 CRLF 换行，否则 cmd.exe 可能无法运行');
   for (const dir of APP_DIRS) await copyDir(path.join(ROOT, dir), path.join(stageDir, dir));
 
   // 生产依赖：优先在 staging 内 npm ci --omit=dev；失败时回退复制当前 node_modules

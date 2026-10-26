@@ -546,7 +546,7 @@ async function main() {
     await page.waitForTimeout(900);
     ok('设置保存请求已发送');
     const aboutText = await page.locator('#settings-about').innerText();
-    if (/软件升级/.test(aboutText) && /v0\.2\.0|版本/.test(aboutText)) ok('关于页展示版本与软件升级'); else fail('关于页缺少版本/软件升级');
+    if (/软件升级/.test(aboutText) && /v\d+\.\d+\.\d+|版本/.test(aboutText)) ok('关于页展示版本与软件升级'); else fail('关于页缺少版本/软件升级');
     if (await page.locator('[data-update-file]').count() === 1) ok('提供补丁包导入入口'); else fail('缺少补丁包导入入口');
     // 导入缺失视频路径：应提示并跳过
     const missingPayload = {
