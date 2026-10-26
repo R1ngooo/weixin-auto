@@ -27,7 +27,7 @@ jobs:
         run: npm ci
 
       - name: Install Playwright Chromium
-        run: npx playwright install chromium
+        run: npx playwright-core install chromium
 
       - name: Determine versions
         id: version

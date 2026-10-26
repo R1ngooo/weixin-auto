@@ -363,7 +363,7 @@ node scripts/build-patch.mjs --from <ref> --to <ref>    # 生成补丁 zip（需
 npm run test:patch                      # 补丁应用/校验/回滚自检
 ```
 
-- 构建便携包需要本机有 Playwright Chromium 缓存（`npx playwright install chromium`）与 Node 22.16+。
+- 构建便携包需要本机有 Playwright Chromium 缓存（`npx playwright-core install chromium`）与 Node 22.16+。
 - `.github/workflows/release.yml`：推送 `v*` tag 时在 GitHub Actions 自动构建便携包、补丁（有上一个 tag 时）并上传 GitHub Releases。
 
 ---
