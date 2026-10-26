@@ -1,6 +1,6 @@
 {
   "name": "weixin-auto",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "视频号助手自动化上传工具：主体登录管理、视频池、文本池、发表动态自动化、标签分组、执行结果同步",
   "type": "module",
@@ -9,13 +9,22 @@
     "start": "node server/index.js",
     "dev": "node --watch server/index.js",
     "smoke": "node scripts/smoke-test.mjs",
-    "ui-test": "node scripts/ui-test.mjs"
+    "ui-test": "node scripts/ui-test.mjs",
+    "test:wechat": "node scripts/wechat-stability.mjs",
+    "build:portable": "node scripts/build-portable.mjs",
+    "build:patch": "node scripts/build-patch.mjs",
+    "test:patch": "node scripts/verify-patch.mjs",
+    "test:package": "node scripts/verify-package.mjs"
   },
   "engines": {
     "node": ">=22.16"
   },
   "dependencies": {
+    "adm-zip": "^0.5.16",
     "express": "4.21.2",
     "playwright-core": "1.60.0"
+  },
+  "devDependencies": {
+    "archiver": "^7.0.1"
   }
 }

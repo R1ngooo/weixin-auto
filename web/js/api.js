@@ -127,6 +127,8 @@ export const api = {
   resetSettings: () => request('/settings/reset', { method: 'POST', body: {} }),
   browsers: () => request('/settings/browsers'),
   importPayload: (payload, mode) => request('/settings/import', { method: 'POST', body: { payload, mode } }),
+  updateStatus: () => request('/update/status'),
+  applyUpdate: (dataBase64, fileName = '') => request('/update/apply', { method: 'POST', body: { dataBase64, fileName } }),
 
   // 微信
   wechatStatus: () => request('/wechat/status'),

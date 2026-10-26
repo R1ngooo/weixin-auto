@@ -14,6 +14,8 @@ export const settingsPage = {
     const data = await store.loadSettings(true);
     const settings = data.settings;
     const browsers = await store.loadBrowsers(true);
+    let updateStatus = null;
+    try { updateStatus = await api.get('/update/status'); } catch { updateStatus = null; }
     let selectorOverrides = settings.selectors || {};
     let navCleanup = () => undefined;
 
@@ -165,7 +167,7 @@ export const settingsPage = {
                 <div class="col">
                   <div class="field"><span>导出内容</span>
                     <div class="row">
-                      ${['settings:设置', 'tags:标签', 'subjects:主体信息', 'videos:视频元数据', 'texts:文本池', 'configs:发布配置'].map((item) => {
+                      ${['settings:设置', 'tags:标签', 'subjects:主体信息', 'videos:视频元数据（含本地路径）', 'texts:文本池', 'configs:发布配置'].map((item) => {
                         const [key, label] = item.split(':');
                         return `<label class="check"><input type="checkbox" data-export="${key}" checked> ${label}</label>`;
                       }).join('')}
@@ -175,7 +177,7 @@ export const settingsPage = {
                     <button class="btn small primary" data-act="export">导出为 JSON 文件</button>
                     <button class="btn small" data-act="export-save">保存到 data/backups</button>
                   </div>
-                  <div class="help-text">导出不包含浏览器登录态（profiles）与微信机器人 token。</div>
+                  <div class="help-text">导出不包含浏览器登录态（profiles）与微信机器人 token；视频只导出本地路径，不复制视频文件。导入到新机器时会检查路径，缺失的视频会跳过并提示。</div>
                 </div>
                 <div class="col">
                   <div class="field"><span>导入配置</span>
@@ -197,12 +199,21 @@ export const settingsPage = {
             <section class="card settings-section" id="settings-about">
               <div class="card-title">关于</div>
               <div class="kv small">
-                <div class="k">版本</div><div>0.1.0</div>
+                <div class="k">版本</div><div>${esc(updateStatus?.version || '0.2.0')} <span class="muted-2">（${esc(updateStatus?.build || 'dev')}${updateStatus?.builtAt ? ` · ${esc(updateStatus.builtAt)}` : ''}）</span></div>
                 <div class="k">数据目录</div><div class="mono">${esc(data.dataDir)}</div>
                 <div class="k">dsh 目录</div><div class="mono">${esc(data.dshHome)}</div>
                 <div class="k">当前生效</div><div>${settings.browser.headless ? '无头浏览器' : '有头浏览器'} · 步骤延迟 ${settings.timing.stepDelayMs}ms · 演练计入使用次数：${settings.testing?.dryRunCountsUsage ? '开启' : '关闭'}</div>
                 <div class="k">快捷入口</div><div class="row"><a href="#/tags">标签管理</a><a href="#/tasks">执行记录 / 微信结果同步</a></div>
               </div>
+              <div class="divider"></div>
+              <div class="card-title">软件升级 <span class="hint">通过补丁包减少重新安装</span></div>
+              <div class="small muted-2" style="margin-bottom:8px">${updateStatus?.packaged ? '当前为便携安装版' : '当前为源码/开发模式'} · 补丁只更新程序文件，不修改 data 数据、登录态与视频路径。</div>
+              <div class="row" style="flex-wrap:wrap">
+                <label class="btn small ghost" style="cursor:pointer">选择补丁包（.zip）<input type="file" accept=".zip,application/zip" data-update-file style="display:none"></label>
+                <a class="btn small ghost" href="${esc(updateStatus?.releasesUrl || 'https://github.com/R1ngooo/weixin-auto/releases')}" target="_blank" rel="noreferrer">打开发布页</a>
+                <span class="small muted-2" data-update-status>请从官方 Release 下载补丁包</span>
+              </div>
+              <div class="help-text">应用前会校验版本、文件哈希并备份旧文件；便携版应用后自动重启，开发模式请手动重启。历史：${(updateStatus?.history || []).slice(-3).map((item) => `v${esc(item.fromVersion)}→v${esc(item.toVersion)}`).join('、') || '无'}</div>
             </section>
           </div>
         </div>
@@ -346,11 +357,61 @@ export const settingsPage = {
           const payload = JSON.parse(raw);
           const result = await api.importPayload(payload, mode);
           toast(`导入完成：标签 ${result.stats.tags}，主体 ${result.stats.subjects}，视频 ${result.stats.videos}，文本 ${result.stats.texts}，发布配置 ${result.stats.publishConfigs}`, 'success', 6000);
+          if (result.warnings?.length) {
+            const list = result.warnings.slice(0, 100).map((item) => `<tr><td>${esc(item.type === 'folder' ? '文件夹' : '视频')}</td><td>${esc(item.name || '-')}</td><td class="mono small">${esc(item.path || '-')}</td><td class="small">${esc(item.reason || '')}</td></tr>`).join('');
+            modal({
+              title: `导入完成：跳过 ${result.warnings.length} 个缺失路径`,
+              wide: true,
+              body: `
+                <div class="small muted-2" style="margin-bottom:8px">以下视频/文件夹的本地路径在当前电脑不存在，已跳过导入（不影响其它数据）。请恢复相同路径后重新扫描，或手动重新添加。</div>
+                <div class="table-wrap" style="max-height:360px;overflow:auto"><table class="table">
+                  <thead><tr><th>类型</th><th>名称</th><th>本地路径</th><th>原因</th></tr></thead>
+                  <tbody>${list}</tbody>
+                </table></div>
+                ${result.warnings.length > 100 ? '<div class="small muted-2 mt-8">仅显示前 100 条。</div>' : ''}`,
+              footer: '<button class="btn primary" data-close>知道了</button>',
+            });
+          }
           await store.loadTags(true);
           await store.loadSettings(true);
           render();
         } catch (error) {
           toast(`导入失败：${error.message}`, 'error', 6000);
+        }
+      });
+      ctx.root.querySelector('[data-update-file]').addEventListener('change', async (event) => {
+        const input = event.target;
+        const file = input.files?.[0];
+        if (!file) return;
+        const statusEl = ctx.root.querySelector('[data-update-status]');
+        const readBase64 = (target) => new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result || '').split(',')[1] || '');
+          reader.onerror = () => reject(new Error('读取补丁文件失败'));
+          reader.readAsDataURL(target);
+        });
+        try {
+          const base64 = await readBase64(file);
+          const ok = await confirmDialog({
+            title: '应用软件补丁',
+            message: `即将应用补丁「${file.name}」。\n\n只从官方 GitHub Releases 下载补丁；应用前会校验版本与文件哈希，并备份旧文件。用户数据、登录态和视频路径不会被修改。`,
+            okText: '应用补丁',
+          });
+          if (!ok) { input.value = ''; return; }
+          if (statusEl) statusEl.textContent = '正在校验并应用补丁…';
+          const result = await api.applyUpdate(base64, file.name);
+          if (result.restartRequired && result.packaged) {
+            if (statusEl) statusEl.textContent = `补丁已应用：v${result.fromVersion} → v${result.toVersion}，应用正在自动重启…`;
+            toast('补丁已应用，应用正在自动重启', 'success', 6000);
+          } else {
+            if (statusEl) statusEl.textContent = `补丁已应用：v${result.fromVersion} → v${result.toVersion}，请手动重启应用`;
+            toast(`补丁已应用（v${result.toVersion}），请重启应用生效`, 'success', 8000);
+          }
+        } catch (error) {
+          if (statusEl) statusEl.textContent = `补丁应用失败：${error.message}`;
+          toast(`补丁应用失败：${error.message}`, 'error', 8000);
+        } finally {
+          input.value = '';
         }
       });
     }

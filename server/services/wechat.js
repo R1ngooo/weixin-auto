@@ -7,17 +7,31 @@ import { chromium } from 'playwright-core';
 import { getDb } from '../db.js';
 import { getSettings, updateSettings } from '../settings.js';
 import { nowIso, sleep, uid } from '../util.js';
+import { showLocalNotification } from './notifier.js';
 
 const db = () => getDb();
 
 const ILINK_BASE = 'https://ilinkai.weixin.qq.com/';
 const PROTOCOL_VERSION = '2.4.6';
-const BOT_AGENT = 'weixin-auto/0.1.0';
+const BOT_AGENT = 'weixin-auto/0.2.0';
 const APP_ID = 'bot';
 const CLIENT_VERSION = (2 << 16) | (4 << 8) | 6;
 const LONG_POLL_TIMEOUT_MS = 35_000;
+const SESSION_NOTICE_COOLDOWN_MS = 10 * 60_000;
+const SESSION_REMINDER_TEXT = '【视频号助手自动化工具】微信机器人会话需要续期：请给这个机器人发送任意一条消息，然后在工具「执行记录 → 微信机器人」中点击「刷新连接上下文」，之后结果同步即可恢复。';
 
 const TERMINAL = new Set(['success', 'failed', 'expired', 'cancelled']);
+
+/** 把微信发送失败归类；session 表示需要用户续期上下文，auth 表示机器人授权失效 */
+export function classifyWechatFailure(error) {
+  const message = String(error?.message || error || '');
+  if (/超时|timeout|fetch failed|network|ENOTFOUND|ECONN|HTTP 5\d\d/i.test(message)) return 'network';
+  if (/未启用|未绑定|缺少.*(token|凭据)|not configured|未配置/i.test(message)) return 'config';
+  if (/HTTP 401|HTTP 403|unauthorized|forbidden/i.test(message)) return 'auth';
+  if (/token.*(无效|失效|invalid|revoked)|机器人.*(被)?移除|unbind|重新绑定/i.test(message)) return 'auth';
+  if (/context|会话|session|expired|过期|login|登录|授权|续期/i.test(message)) return 'session';
+  return 'other';
+}
 
 function commonHeaders() {
   return {
@@ -156,9 +170,10 @@ export function readDshImWeixinAccounts() {
 }
 
 export class WechatService {
-  constructor() {
+  constructor({ sessionNotifier = showLocalNotification } = {}) {
     /** @type {Map<string, any>} */
     this.bindingAttempts = new Map();
+    this.sessionNotifier = sessionNotifier;
   }
 
   listBots() {
@@ -168,6 +183,10 @@ export class WechatService {
       ownerUserId: row.owner_user_id,
       baseUrl: row.base_url,
       hasContextToken: Boolean(row.context_token),
+      needsContextRefresh: Boolean(row.needs_context_refresh),
+      lastContextError: row.last_context_error || '',
+      lastNoticeAt: row.last_notice_at || '',
+      noticeDelivery: row.notice_delivery || '',
       nickname: row.nickname || '',
       source: row.source,
       status: row.status,
@@ -199,10 +218,20 @@ export class WechatService {
   status() {
     const dsh = readDshImWeixinAccounts();
     const settings = getSettings();
+    const bots = this.listBots();
+    const needsContext = bots.find((bot) => bot.needsContextRefresh);
     return {
       enabled: Boolean(settings.wechat?.enabled),
       botId: settings.wechat?.botId || '',
-      bots: this.listBots(),
+      bots,
+      sessionNotice: needsContext ? {
+        needed: true,
+        botId: needsContext.botId,
+        message: '微信机器人会话需要续期：请先给机器人发送任意消息，再点击「刷新连接上下文」',
+        lastNoticeAt: needsContext.lastNoticeAt || '',
+        delivery: needsContext.noticeDelivery || '',
+        error: needsContext.lastContextError || '',
+      } : null,
       dshIm: {
         available: dsh.available,
         configPath: dsh.configPath,
@@ -249,7 +278,9 @@ export class WechatService {
          VALUES (?, ?, ?, ?, ?, ?, ?, 'dsh-im', 'active', ?, ?)
          ON CONFLICT(bot_id) DO UPDATE SET token = excluded.token, owner_user_id = excluded.owner_user_id,
            base_url = excluded.base_url, context_token = COALESCE(excluded.context_token, context_token),
-           nickname = COALESCE(excluded.nickname, nickname), status = 'active', updated_at = excluded.updated_at`,
+           nickname = COALESCE(excluded.nickname, nickname), status = 'active',
+           needs_context_refresh = 0, last_context_error = NULL, last_notice_at = NULL, notice_delivery = NULL,
+           updated_at = excluded.updated_at`,
         account.botId, account.accountId, account.token, account.ownerUserId, account.baseUrl,
         account.contextToken || null, account.deliveryName || null, now, now,
       );
@@ -390,7 +421,9 @@ export class WechatService {
           `INSERT INTO wechat_bots (bot_id, account_id, token, owner_user_id, base_url, context_token, nickname, source, status, created_at, updated_at)
            VALUES (?, ?, ?, ?, ?, NULL, NULL, 'bind', 'active', ?, ?)
            ON CONFLICT(bot_id) DO UPDATE SET token = excluded.token, owner_user_id = excluded.owner_user_id,
-             base_url = excluded.base_url, status = 'active', updated_at = excluded.updated_at`,
+             base_url = excluded.base_url, status = 'active',
+             needs_context_refresh = 0, last_context_error = NULL, last_notice_at = NULL, notice_delivery = NULL,
+             updated_at = excluded.updated_at`,
           accountId, accountId, token, ownerUserId, baseUrl, now, now,
         );
         updateSettings({ wechat: { enabled: true, botId: accountId } });
@@ -473,11 +506,8 @@ export class WechatService {
     return this.qrRenderChain;
   }
 
-  async sendText(text, { botId = null } = {}) {
-    const settings = getSettings();
-    if (!settings.wechat?.enabled) throw new Error('未启用微信结果同步');
-    const bot = botId ? this.getBot(botId) : this.activeBot();
-    if (!bot) throw new Error('未绑定微信机器人，请先在设置中导入或扫码绑定');
+  /** 底层发送；includeContext=false 时用于会话续期提醒的兜底尝试 */
+  async deliver(bot, text, { includeContext = true } = {}) {
     const content = String(text || '').trim();
     if (!content) throw new Error('消息内容不能为空');
     const response = await requestJson({
@@ -494,16 +524,101 @@ export class WechatService {
           message_type: 2,
           message_state: 2,
           item_list: [{ type: 1, text_item: { text: content.slice(0, 1800) } }],
-          ...(bot.context_token ? { context_token: bot.context_token } : {}),
+          ...(includeContext && bot.context_token ? { context_token: bot.context_token } : {}),
         },
         base_info: baseInfo(),
       },
     });
     if (response?.ret !== undefined && response.ret !== 0) {
-      throw new Error(`微信服务拒绝了消息（ret=${response.ret}${response.errmsg ? `，${response.errmsg}` : ''}）`);
+      const error = new Error(`微信服务拒绝了消息（ret=${response.ret}${response.errmsg ? `，${response.errmsg}` : ''}）`);
+      error.ret = response.ret;
+      error.errmsg = response.errmsg || '';
+      throw error;
     }
-    db().run('UPDATE wechat_bots SET updated_at = ?, last_error = NULL WHERE bot_id = ?', nowIso(), bot.bot_id);
-    return { sent: true, botId: bot.bot_id };
+    return response;
+  }
+
+  async sendText(text, { botId = null, allowSessionNotice = true } = {}) {
+    const settings = getSettings();
+    if (!settings.wechat?.enabled) throw new Error('未启用微信结果同步');
+    const bot = botId ? this.getBot(botId) : this.activeBot();
+    if (!bot) throw new Error('未绑定微信机器人，请先在设置中导入或扫码绑定');
+    const content = String(text || '').trim();
+    if (!content) throw new Error('消息内容不能为空');
+    try {
+      await this.deliver(bot, content, { includeContext: true });
+      db().run(
+        'UPDATE wechat_bots SET updated_at = ?, last_error = NULL, needs_context_refresh = 0, last_context_error = NULL WHERE bot_id = ?',
+        nowIso(), bot.bot_id,
+      );
+      return { sent: true, botId: bot.bot_id };
+    } catch (error) {
+      const kind = classifyWechatFailure(error);
+      db().run('UPDATE wechat_bots SET updated_at = ?, last_error = ? WHERE bot_id = ?', nowIso(), String(error?.message || error), bot.bot_id);
+      if (allowSessionNotice && kind === 'session') await this.handleSessionFailure(bot, error);
+      else if (kind === 'auth') await this.handleAuthFailure(bot, error);
+      throw error;
+    }
+  }
+
+  /** 会话续期：先尝试微信提醒，再退化为本地通知；10 分钟内不重复通知 */
+  async handleSessionFailure(bot, error) {
+    const message = String(error?.message || error);
+    db().run(
+      'UPDATE wechat_bots SET needs_context_refresh = 1, last_context_error = ?, updated_at = ? WHERE bot_id = ?',
+      message.slice(0, 500), nowIso(), bot.bot_id,
+    );
+    const previous = db().get('SELECT last_notice_at FROM wechat_bots WHERE bot_id = ?', bot.bot_id)?.last_notice_at;
+    const previousAt = previous ? Date.parse(previous) : 0;
+    if (previousAt && Date.now() - previousAt < SESSION_NOTICE_COOLDOWN_MS) return;
+    let delivery = 'none';
+    // 1) 尝试通过机器人自身发微信提醒（不带旧 context_token，避免被旧会话卡住）
+    try {
+      const fresh = this.getBot(bot.bot_id) || bot;
+      await this.deliver(fresh, SESSION_REMINDER_TEXT, { includeContext: false });
+      delivery = 'wechat';
+    } catch { /* 继续本地兜底 */ }
+    // 2) 本地 Windows 通知
+    if (delivery === 'none' && typeof this.sessionNotifier === 'function') {
+      try {
+        const result = await this.sessionNotifier({
+          title: '视频号助手自动化工具',
+          message: '微信机器人会话需要续期：请给机器人发送任意消息，然后点击「刷新连接上下文」。',
+        });
+        delivery = result?.shown ? 'local' : 'log';
+      } catch { delivery = 'log'; }
+    } else if (delivery === 'none') {
+      delivery = 'log';
+    }
+    db().run(
+      'UPDATE wechat_bots SET last_notice_at = ?, notice_delivery = ?, updated_at = ? WHERE bot_id = ?',
+      nowIso(), delivery, nowIso(), bot.bot_id,
+    );
+    console.warn(`[wechat] 会话需要续期（${bot.bot_id}），通知方式：${delivery}；原因：${message.slice(0, 120)}`);
+    return delivery;
+  }
+
+  /** 机器人授权/token 失效：本地通知用户重新绑定 */
+  async handleAuthFailure(bot, error) {
+    const message = String(error?.message || error);
+    const previous = db().get('SELECT last_notice_at FROM wechat_bots WHERE bot_id = ?', bot.bot_id)?.last_notice_at;
+    const previousAt = previous ? Date.parse(previous) : 0;
+    if (previousAt && Date.now() - previousAt < SESSION_NOTICE_COOLDOWN_MS) return;
+    let delivery = 'none';
+    if (typeof this.sessionNotifier === 'function') {
+      try {
+        const result = await this.sessionNotifier({
+          title: '视频号助手自动化工具',
+          message: '微信机器人授权可能已失效，请到「执行记录 → 微信机器人」重新导入或扫码绑定。',
+        });
+        delivery = result?.shown ? 'local' : 'log';
+      } catch { delivery = 'log'; }
+    }
+    db().run(
+      'UPDATE wechat_bots SET last_notice_at = ?, notice_delivery = ?, updated_at = ? WHERE bot_id = ?',
+      nowIso(), delivery, nowIso(), bot.bot_id,
+    );
+    console.warn(`[wechat] 机器人授权异常（${bot.bot_id}），通知方式：${delivery}；原因：${message.slice(0, 120)}`);
   }
 
   async testSend() {
@@ -541,6 +656,12 @@ export class WechatService {
     }
     if (response?.get_updates_buf) {
       db().setSetting('wechat-updates-buf', response.get_updates_buf);
+    }
+    if (captured > 0) {
+      db().run(
+        'UPDATE wechat_bots SET needs_context_refresh = 0, last_context_error = NULL, last_error = NULL, updated_at = ? WHERE bot_id = ?',
+        nowIso(), bot.bot_id,
+      );
     }
     return { messages: (response?.msgs || []).length, captured };
   }

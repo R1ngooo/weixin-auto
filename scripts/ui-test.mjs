@@ -545,6 +545,23 @@ async function main() {
     await page.locator('#topbar-right button:has-text("保存设置")').click();
     await page.waitForTimeout(900);
     ok('设置保存请求已发送');
+    const aboutText = await page.locator('#settings-about').innerText();
+    if (/软件升级/.test(aboutText) && /v0\.2\.0|版本/.test(aboutText)) ok('关于页展示版本与软件升级'); else fail('关于页缺少版本/软件升级');
+    if (await page.locator('[data-update-file]').count() === 1) ok('提供补丁包导入入口'); else fail('缺少补丁包导入入口');
+    // 导入缺失视频路径：应提示并跳过
+    const missingPayload = {
+      app: 'weixin-auto',
+      videos: [{ id: 9999, path: 'Z:\\__wxa_ui_missing__\\missing.mp4', name: 'missing.mp4', ext: '.mp4', size: 1, md5: 'x', folder: 'Z:\\__wxa_ui_missing__' }],
+      videoFolders: [{ path: 'Z:\\__wxa_ui_missing__', recursive: 1, enabled: 1 }],
+    };
+    await page.locator('[data-import-text]').fill(JSON.stringify(missingPayload));
+    await page.locator('[data-act="import"]').click();
+    await page.waitForSelector('.modal-overlay');
+    await page.locator('.modal-foot button:has-text("开始导入")').click();
+    await waitFor(async () => (await page.locator('.modal-title:has-text("跳过")').count()) > 0, { timeout: 8000, label: '缺失路径提示' });
+    ok('导入缺失路径时显示跳过提示');
+    await page.locator('.modal-close').click();
+    await page.waitForTimeout(400);
   } finally {
     await page.screenshot({ path: path.join(DATA_DIR, 'ui-final.png') }).catch(() => undefined);
     await browser.close().catch(() => undefined);

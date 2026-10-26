@@ -228,6 +228,11 @@ export class Db {
     this.ensureColumn('tasks', 'schedule_interval_minutes', 'INTEGER');
     this.ensureColumn('tasks', 'schedule_kind', 'TEXT');
     this.ensureColumn('task_items', 'scheduled_at', 'TEXT');
+    // 微信机器人会话续期通知状态
+    this.ensureColumn('wechat_bots', 'needs_context_refresh', 'INTEGER NOT NULL DEFAULT 0');
+    this.ensureColumn('wechat_bots', 'last_context_error', 'TEXT');
+    this.ensureColumn('wechat_bots', 'last_notice_at', 'TEXT');
+    this.ensureColumn('wechat_bots', 'notice_delivery', 'TEXT');
     this.migrateTagGroups();
   }
 

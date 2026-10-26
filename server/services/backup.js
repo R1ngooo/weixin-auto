@@ -7,7 +7,21 @@ import { ensureDir, nowIso } from '../util.js';
 
 const db = () => getDb();
 
-const EXPORT_VERSION = 1;
+const EXPORT_VERSION = 2;
+
+/** 检查导入路径：视频必须是存在的文件，文件夹必须是存在的目录 */
+async function checkPath(target, type) {
+  const value = String(target || '').trim();
+  if (!value) return { ok: false, path: '', reason: '缺少本地路径' };
+  const resolved = path.resolve(value);
+  try {
+    const stat = await fsp.stat(resolved);
+    const ok = type === 'file' ? stat.isFile() : stat.isDirectory();
+    return { ok, path: resolved, reason: ok ? '' : (type === 'file' ? '路径不是文件' : '路径不是文件夹') };
+  } catch {
+    return { ok: false, path: resolved, reason: '本地路径不存在' };
+  }
+}
 
 export class BackupService {
   async exportAll({ include = {} } = {}) {
@@ -45,7 +59,29 @@ export class BackupService {
   async importAll(payload, { mode = 'merge' } = {}) {
     if (!payload || typeof payload !== 'object') throw new Error('导入文件格式不正确');
     if (payload.app && payload.app !== 'weixin-auto') throw new Error('不是本工具导出的配置文件');
-    const stats = { tagGroups: 0, tags: 0, subjects: 0, videos: 0, texts: 0, publishConfigs: 0, folders: 0 };
+    const stats = { tagGroups: 0, tags: 0, subjects: 0, videos: 0, videosSkipped: 0, texts: 0, publishConfigs: 0, folders: 0, foldersSkipped: 0 };
+    const warnings = [];
+    // 先检查视频/文件夹的本地路径：目标机器没有的条目跳过并提示，不产生半导入数据
+    const videoPrepared = [];
+    for (const video of payload.videos || []) {
+      const checked = await checkPath(video.path, 'file');
+      if (!checked.ok) {
+        stats.videosSkipped += 1;
+        warnings.push({ type: 'video', name: video.name || path.basename(checked.path || String(video.path || '')), path: checked.path || String(video.path || ''), reason: checked.reason });
+        continue;
+      }
+      videoPrepared.push({ ...video, path: checked.path });
+    }
+    const folderPrepared = [];
+    for (const folder of payload.videoFolders || []) {
+      const checked = await checkPath(folder.path, 'folder');
+      if (!checked.ok) {
+        stats.foldersSkipped += 1;
+        warnings.push({ type: 'folder', name: path.basename(checked.path || String(folder.path || '')), path: checked.path || String(folder.path || ''), reason: checked.reason });
+        continue;
+      }
+      folderPrepared.push({ ...folder, path: checked.path });
+    }
     const tagIdMap = new Map();
     const groupIdMap = new Map();
 
@@ -107,7 +143,7 @@ export class BackupService {
         return JSON.stringify(mapped);
       };
       // 视频文件夹
-      for (const folder of payload.videoFolders || []) {
+      for (const folder of folderPrepared) {
         try {
           const tagIds = folder.tag_ids !== undefined ? remapFolderTags(folder.tag_ids) : null;
           db().run('INSERT OR IGNORE INTO video_folders (path, recursive, enabled, tag_ids, created_at) VALUES (?, ?, ?, ?, ?)',
@@ -120,7 +156,7 @@ export class BackupService {
       }
       // 视频（按路径合并）
       const videoIdMap = new Map();
-      for (const video of payload.videos || []) {
+      for (const video of videoPrepared) {
         const existing = db().get('SELECT id FROM videos WHERE path = ?', video.path);
         let id;
         if (existing) {
@@ -213,7 +249,7 @@ export class BackupService {
 
     if (payload.settings && mode === 'replace') replaceSettings(payload.settings);
     else if (payload.settings) updateSettings(payload.settings);
-    return { stats };
+    return { stats, warnings };
   }
 
   async createDbSnapshot() {

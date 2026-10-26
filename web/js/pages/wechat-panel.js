@@ -18,6 +18,16 @@ export async function renderWechatPanel(container) {
 
   const dsh = status.dshIm || { available: false, accounts: [] };
   container.innerHTML = `
+    ${status.sessionNotice ? `<div class="card" style="border-color:var(--yellow);background:#fff8e6;margin-bottom:12px">
+      <div class="row between">
+        <div>
+          <div style="font-weight:650;color:var(--text)">微信机器人会话需要续期</div>
+          <div class="small" style="margin-top:4px">${esc(status.sessionNotice.message)}</div>
+          <div class="small muted-2" style="margin-top:4px">最近通知：${esc(status.sessionNotice.lastNoticeAt ? new Date(status.sessionNotice.lastNoticeAt).toLocaleString('zh-CN', { hour12: false }) : '尚未发送')} · 方式：${esc(status.sessionNotice.delivery || '未发送')}</div>
+        </div>
+        <span class="badge yellow">待续期</span>
+      </div>
+    </div>` : ''}
     <div class="card">
       <div class="row between">
         <div class="card-title" style="margin:0">微信机器人（执行结果同步） <span class="hint">任务完成后把执行结果推送到微信</span></div>
@@ -38,7 +48,7 @@ export async function renderWechatPanel(container) {
                 <div>
                   <div style="font-weight:600">${esc(bot.nickname || bot.accountId || bot.botId)}</div>
                   <div class="small muted-2 mono">${esc(bot.accountId || bot.botId)}</div>
-                  <div class="small muted-2">来源：${bot.source === 'dsh-im' ? '本机 dsh-im 导入' : '扫码绑定'} · ${bot.hasContextToken ? '有会话上下文' : '缺少上下文（先在微信里给机器人发一条消息，再点「刷新连接上下文」）'}</div>
+                  <div class="small muted-2">来源：${bot.source === 'dsh-im' ? '本机 dsh-im 导入' : '扫码绑定'} · ${bot.hasContextToken ? '有会话上下文' : '缺少上下文（先在微信里给机器人发一条消息，再点「刷新连接上下文」）'}${bot.needsContextRefresh ? ' · 会话待续期' : ''}</div>
                 </div>
                 <div class="row">
                   ${status.botId === bot.botId ? badge('当前使用', 'green') : `<button class="btn small ghost" data-wx="active" data-bot="${esc(bot.botId)}">设为使用</button>`}

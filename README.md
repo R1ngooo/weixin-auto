@@ -31,22 +31,23 @@
 
 ### 环境要求
 
-- Windows 10/11（当前主要在 Windows 下验证）
-- Node.js **22.16+**（使用内置 `node:sqlite`，无需编译原生依赖）
+- Windows 10/11 x64（当前主要在 Windows 下验证）
+- **便携版**：无需安装 Node.js，解压 ZIP 后双击 `start.cmd`（内置 Node 与 Playwright Chromium）
+- **源码运行**：Node.js **22.16+**（使用内置 `node:sqlite`，无需编译原生依赖）
 - 能访问 `channels.weixin.qq.com`、`res.wx.qq.com`、`open.weixin.qq.com`
 
 ### 启动
 
 ```bat
-:: 方式一：双击 start.cmd（会自动安装依赖并打开面板）
+:: 便携版：下载 GitHub Releases 中的 weixin-auto-<版本>-win-x64.zip，解压后双击
 start.cmd
 
-:: 方式二：命令行
+:: 源码/开发方式
 npm install
 npm start
 ```
 
-启动后访问：**http://127.0.0.1:3210**（端口被占用时会自动向后顺延，控制台会打印实际地址）。
+启动后访问：**http://127.0.0.1:3210**（端口被占用时会自动向后顺延，控制台会打印实际地址）。便携版由 `launcher.mjs` 启动：首次启动会自动打开浏览器；补丁应用后进程退出码 75 会自动重启。
 
 ### 浏览器内核
 
@@ -185,6 +186,8 @@ weixin-auto/
 - **导入 dsh-im 机器人（推荐）**：读取本机 `~/.dsh/integrations/dsh-weixin/config.json`、`~/.dsh/.credentials.yaml`、机器人 `state.json` 中的凭据与会话上下文（context_token），导入后可直接向你的微信推送消息。
 - **扫码绑定新机器人**：使用微信 iLink 机器人接口申请二维码（`ilink/bot/get_bot_qrcode`），工具把返回的 liteapp 二维码页面用无头浏览器截图后展示；扫码确认后保存 bot 凭据。
 - **主动推送**：`ilink/bot/sendmessage`；若缺少 context_token，请先在微信里给机器人发一条消息，再在执行记录页点「刷新连接上下文」。
+- **稳定性与续期通知**：发送失败会分类为网络/配置/授权/会话问题；确认是会话（context_token）需要续期时，会先尝试给机器人发微信提醒，失败再弹 Windows 通知并在执行记录页顶部显示「会话需要续期」横幅；同一机器人 10 分钟内不重复通知。重新导入机器人、扫码绑定或刷新上下文成功后会清除待续期状态。
+- **稳定性自检**：`npm run test:wechat`（默认 mock，不发送真实消息）；真实发送需 `node scripts/wechat-stability.mjs --live --yes`。
 - 任务是否推送由发布配置中的「执行结果同步到微信机器人」与执行记录页的「启用结果同步」共同决定。
 
 ---
@@ -193,7 +196,8 @@ weixin-auto/
 
 - 系统设置 → 配置导入/导出：勾选要导出的内容，导出 JSON 文件（或保存到 `data/backups/`）。
 - 新机器导入时选择「合并」（按名称/内容/路径去重）或「替换」（清空标签/配置后导入）。
-- 说明：**浏览器登录态（profiles）不会导出**，迁移到新机器后需要重新扫码登录主体；视频文件按路径关联，请保持原路径或重新扫描。
+- 说明：**浏览器登录态（profiles）不会导出**，迁移到新机器后需要重新扫码登录主体；**视频/视频文件夹会导出本地绝对路径**（不复制视频文件）。导入时逐条检查目标机器路径：不存在的视频/文件夹会跳过，并在导入结果弹窗中列出缺失路径，其余数据正常导入；保持原路径或重新扫描即可恢复。
+- 更详细的迁移步骤：先在新机器安装/解压便携包 → 导入 JSON → 视频路径不一致时按提示恢复目录 → 重新扫描 → 主体重新扫码登录。
 
 ---
 
@@ -201,6 +205,7 @@ weixin-auto/
 
 - 所有数据保存在本机 `data/` 目录；服务默认只监听 `127.0.0.1`，不对外网开放。
 - 登录态保存在本地浏览器目录；微信机器人 token 保存在本地 SQLite。
+- 便携包只包含程序运行文件（Node/Chromium/源码），不包含 `data/`、登录态、token、日志和视频文件；补丁包同样不会修改 `data/`。
 - 请勿把 `data/`、`.credentials` 相关内容提交到代码仓库或分享给他人。
 
 ---
@@ -208,11 +213,14 @@ weixin-auto/
 ## 9. 测试
 
 ```bash
-npm run smoke     # 隔离数据目录启动服务，验证 API/扫描/自动MD5/标签组与单选约束/删除保护/文件夹标签/演练零污染/软移除+MD5恢复/导出导入、主体删除备份/重复主体合并/扫码登录无头、资源标签配置/短标题与定时校验/固定资源多选/每主体数量上限/随机不重复自动重置/链接商品ID解析/定时发表起点+间隔+作用范围/任务级定时执行与互斥/定时任务自动开始/先传后搭预热触发等 40 项
-npm run ui-test   # 用 Playwright 驱动面板：主体卡片统一布局/状态右上同排、删除确认（含取消）、无头扫码弹窗与快速刷新、标签组/单选约束、发布配置新排版（先传后搭/短标题必填 6-16 字/链接必填/定时间隔与作用范围/去掉废弃选项/资源标签筛选/配置复制）、任务定时执行控件与灰置提示、标签筛选、三种显示模式、批量移除、系统/面板文件夹选择、设置瀑布布局等
+npm run smoke       # 隔离数据目录启动服务，验证 API/扫描/自动MD5/标签组/删除保护/演练零污染/软移除+MD5恢复/导出导入（含缺失路径跳过）/主体合并/无头扫码/资源标签配置/短标题与定时校验/固定资源/每主体数量/随机不重复自动重置/链接商品ID/定时发表/任务级定时执行/先传后搭预热/版本升级接口等 42 项
+npm run ui-test     # Playwright 驱动面板：主体卡片/删除确认、无头扫码与快速刷新、标签组、发布配置新排版与排期控件、任务定时执行灰置、设置页版本/补丁入口、导入缺失路径提示等
+npm run test:wechat # 微信机器人封装稳定性 mock 自检（连续发送/会话续期通知/冷却/网络错误），默认不发真实消息
+npm run test:patch  # 补丁应用自检：文件更新/删除/备份/版本、哈希错误/路径穿越/依赖变更拒绝
+npm run test:package # 验证已构建的便携包：内置 Node/Chromium、/api/health、版本、升级接口、首页
 ```
 
-两个测试都会使用独立数据目录与端口，不会影响正式数据。UI 测试会额外校验：点击弹窗遮罩不会关闭弹窗、右上角 × 可正常关闭、取消确认不执行删除、确定后卡片立即消失；扫码登录测试会记录二维码出现/刷新耗时（网络异常时输出警告并继续）。
+测试使用独立数据目录与端口，不会影响正式数据。二维码/二维码刷新与打包验证可能依赖网络和本机浏览器；`test:wechat -- --live --yes` 会真实发送微信消息，默认不执行。
 
 ---
 
@@ -323,20 +331,47 @@ npm run ui-test   # 用 Playwright 驱动面板：主体卡片统一布局/状�
 | GET/POST | `/api/tasks`、`/api/tasks/:id/start`、`/api/tasks/:id/cancel` | 任务；创建时 `overrides` 支持 `dryRun/subjectLimit/perSubjectCount/schedule{enabled,value,intervalMinutes}`，配置已启用定时发表时 `schedule` 会被拒绝 |
 | GET/POST | `/api/wechat/status`、`/api/wechat/import`、`/api/wechat/bind` | 微信机器人 |
 | POST | `/api/wechat/notify` | 通过已绑定的微信机器人推送任意文本（`{ text }`） |
-| GET | `/api/settings/export`、`POST /api/settings/import` | 配置迁移 |
+| GET | `/api/settings/export`、`POST /api/settings/import` | 配置迁移；video/folder 路径一并导出，导入返回 `{stats,warnings}`，缺失路径的条目跳过 |
+| GET | `/api/version`、`/api/update/status` | 版本/build 与补丁升级状态、历史、GitHub Releases 地址 |
+| POST | `/api/update/apply` | 应用补丁包（JSON `{fileName,dataBase64}`）；校验版本/哈希/路径，备份后原子更新，便携版自动重启 |
 
 ---
 
-## 12. Git 版本管理
+## 12. 便携版、打包与补丁升级
 
-项目已初始化为 Git 仓库（分支 `main`），首次提交包含全部源码与文档：
+### 便携版
+
+- GitHub Releases: <https://github.com/R1ngooo/weixin-auto/releases>
+- 下载 `weixin-auto-<版本>-win-x64.zip` → 解压到任意目录 → 双击 `start.cmd`（无需安装 Node；包内 `runtime/node.exe` 与 `runtime/ms-playwright` 已内置）。
+- 首次启动会自动打开面板；数据保存在解压目录旁的 `data/`，升级补丁不会修改该目录。
+- 如需更新浏览器内核，使用完整包升级（补丁只包含源码/页面文件）。
+
+### 补丁包升级
+
+- 应用内：「系统设置 → 关于 → 软件升级」选择补丁 `.zip`，确认后自动校验/备份/更新；便携版会通过 launcher 自动重启，开发模式需手动重启。
+- 补丁从 GitHub Releases 获取，命名 `weixin-auto-patch-<from>-to-<to>.zip`；请只使用官方 Release 的补丁。
+- 补丁内容限制在 `server/`、`web/`、`version.json`、`start.cmd`、`launcher.mjs`、README 等程序文件；`data/`、登录态、视频路径、`node_modules/`、Chromium 不会被补丁修改。依赖/运行时变化必须发布完整包。
+- 应用前会备份被覆盖文件到 `data/backups/updates/`，更新历史见 `data/updates/history.json`。
+
+### 本地构建命令
 
 ```bash
-git log --oneline          # 查看提交历史
-git status                 # 查看工作区状态（正常应为 clean）
-git add -A && git commit -m "feat: xxx"
+npm install
+npm run build:portable                  # 生成 dist/weixin-auto-<版本>-win-x64.zip + sha256
+npm run test:package                    # 验证 staging 便携包（Node/Chromium/health/升级接口）
+npm run build:patch -- --from <ref> --to <ref>  # 生成补丁 zip（需先修改版本号）
+npm run test:patch                      # 补丁应用/校验/回滚自检
 ```
 
-- **不会入库**：`data/`（数据库、登录态、截图、封面、备份等含隐私/运行数据）、`node_modules/`、测试隔离目录（`.smoke-data/`、`.ui-data/` 等）、日志与临时文件，详见 [.gitignore](.gitignore)。
+- 构建便携包需要本机有 Playwright Chromium 缓存（`npx playwright install chromium`）与 Node 22.16+。
+- `.github/workflows/release.yml`：推送 `v*` tag 时在 GitHub Actions 自动构建便携包、补丁（有上一个 tag 时）并上传 GitHub Releases。
+
+---
+
+## 13. Git 版本管理与开源仓库
+
+- 仓库：<https://github.com/R1ngooo/weixin-auto>（公开）
+- 分支：`main`；发布标签：`v<版本>`（如 `v0.2.0`）。
+- **不会入库**：`data/`（数据库、登录态、截图、封面、备份等含隐私/运行数据）、`node_modules/`、`dist/`、`runtime/`、测试隔离目录（`.smoke-data/`、`.ui-data/` 等）、日志与临时文件，详见 [.gitignore](.gitignore)。
 - 迁移代码时直接 `git clone` 后 `npm install` 即可；运行数据请通过「系统设置 → 配置导入/导出」迁移。
-- 若需要远端备份，可自行 `git remote add origin <仓库地址> && git push -u origin main`。
+- 发布新版本：同步修改 `package.json`/`version.json` → 运行测试 → 构建便携包/补丁 → `git commit` → `git tag vX.Y.Z` → 推送 `main` 与 tag。

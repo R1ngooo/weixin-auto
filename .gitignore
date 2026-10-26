@@ -13,6 +13,11 @@ data/
 .tmp-batch-data/
 .probe/
 
+# 构建产物 / 便携包运行时（不入库）
+dist/
+runtime/
+.runtime-*/
+
 # 日志与临时文件
 *.log
 *.tmp

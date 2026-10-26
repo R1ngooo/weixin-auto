@@ -20,6 +20,7 @@ import { TaskService } from './services/tasks.js';
 import { WechatService } from './services/wechat.js';
 import { BackupService } from './services/backup.js';
 import { createThumbnailService } from './services/thumbnails.js';
+import { createUpdateService } from './services/updater.js';
 
 async function main() {
   for (const dir of [PATHS.data, PATHS.profiles, PATHS.screenshots, PATHS.thumbnails, PATHS.logs, PATHS.backups]) {
@@ -55,6 +56,7 @@ async function main() {
   const picker = new ResourcePicker({ videos, texts });
   const wechat = new WechatService();
   const backup = new BackupService();
+  const updater = createUpdateService();
   const thumbnails = createThumbnailService({ getSettings, jobs });
 
   videos.ensureFoldersFromSettings();
@@ -80,7 +82,7 @@ async function main() {
   app.use(express.urlencoded({ extended: false, limit: '80mb' }));
 
   app.use('/api', createApiRouter({
-    db, subjects, videos, texts, tags, configs, tasks, wechat, backup, jobs, browser, login, session, publisher, picker, thumbnails,
+    db, subjects, videos, texts, tags, configs, tasks, wechat, backup, jobs, browser, login, session, publisher, picker, thumbnails, updater,
   }));
 
   app.use('/files/screenshots', express.static(PATHS.screenshots, { maxAge: '1h' }));

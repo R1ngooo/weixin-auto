@@ -137,7 +137,25 @@ async function main() {
     await check('健康检查', async () => {
       const health = await api('/health');
       assert(health.ok, 'health.ok 应为 true');
-      return `v${health.version}`;
+      assert(health.version && health.build, 'health 应返回版本与 build');
+      return `v${health.version} (${health.build})`;
+    });
+
+    await check('版本与软件升级接口', async () => {
+      const version = await api('/version');
+      const status = await api('/update/status');
+      assert(version.version === status.version, 'version 与 update/status 版本应一致');
+      assert(status.releasesUrl?.includes('github.com/R1ngooo/weixin-auto'), '应返回 GitHub Releases 地址');
+      return `v${version.version}，发布页可用`;
+    });
+
+    await check('微信机器人错误分类', async () => {
+      const { classifyWechatFailure } = await import(new URL('../server/services/wechat.js', import.meta.url));
+      assert(classifyWechatFailure(new Error('fetch failed')) === 'network', '网络错误分类失败');
+      assert(classifyWechatFailure(new Error('微信服务拒绝了消息（ret=9001，context token expired）')) === 'session', '会话错误分类失败');
+      assert(classifyWechatFailure(new Error('HTTP 401 unauthorized')) === 'auth', '授权错误分类失败');
+      assert(classifyWechatFailure(new Error('未绑定微信机器人')) === 'config', '配置错误分类失败');
+      return '网络/会话/授权/配置分类正确';
     });
 
     await check('设置读写', async () => {
@@ -802,6 +820,8 @@ async function main() {
       assert(payload.tags?.length === 5, `导出应包含标签，实际 ${payload.tags?.length}`);
       assert(payload.tagGroups?.length >= 2, `导出应包含标签组，实际 ${payload.tagGroups?.length}`);
       assert(payload.videos?.length === 3, '导出应包含视频元数据');
+      assert(payload.videos.every((video) => Boolean(video.path)), '每个视频应导出本地路径');
+      assert(payload.videoFolders?.every((folder) => Boolean(folder.path)), '视频文件夹应导出本地路径');
       assert(payload.texts?.length === 3, '导出应包含文本');
       assert(payload.publishConfigs?.length >= 2, '导出应包含发布配置');
       state.export = payload;
@@ -818,6 +838,18 @@ async function main() {
       const productTag = groupTags.find((tag) => tag.name === '产品B-测试');
       assert(productTag && productTag.groupName === '产品组-测试', '导入后标签组归属应保留');
       return `新增 视频${result.stats.videos} 主体${result.stats.subjects} 文本${result.stats.texts}，标签组 ${groups.length} 个`;
+    });
+
+    await check('配置导入：缺失本地路径跳过并提示', async () => {
+      const payload = structuredClone(state.export);
+      const missingPath = 'Z:\\__wxa_missing_path__\\not-found.mp4';
+      payload.videos[0].path = missingPath;
+      const result = await api('/settings/import', { method: 'POST', body: { payload, mode: 'merge' } });
+      assert(result.stats.videosSkipped >= 1, `缺失路径应计入跳过，实际 ${result.stats.videosSkipped}`);
+      assert(result.warnings?.some((item) => item.type === 'video' && item.path === missingPath), '应返回缺失路径 warning');
+      const videos = await api('/videos?pageSize=50');
+      assert(videos.total === 3, '缺失路径的视频不应插入数据库');
+      return `跳过 ${result.stats.videosSkipped} 个缺失路径视频：${result.warnings[0]?.reason || ''}`;
     });
 
     await check('软移除视频（保留数据库记录）', async () => {

@@ -4,6 +4,7 @@ import express from 'express';
 import { PATHS } from './config.js';
 import { getSettings, getSelectors, replaceSettings, resetSettings, updateSettings, exportableSettings } from './settings.js';
 import { pickFolder, listDirectories } from './services/folder-dialog.js';
+import { getAppVersion } from './version.js';
 
 const wrap = (handler) => (req, res, next) => {
   Promise.resolve(handler(req, res, next)).then((data) => {
@@ -29,7 +30,7 @@ const listParam = (value) => {
 
 export function createApiRouter(ctx) {
   const {
-    db, subjects, videos, texts, tags, configs, tasks, wechat, backup, jobs, browser, login, session, publisher, picker, thumbnails,
+    db, subjects, videos, texts, tags, configs, tasks, wechat, backup, jobs, browser, login, session, publisher, picker, thumbnails, updater,
   } = ctx;
   const router = express.Router();
 
@@ -37,11 +38,12 @@ export function createApiRouter(ctx) {
   router.get('/health', wrap(async () => ({
     ok: true,
     name: 'weixin-auto',
-    version: '0.1.0',
+    ...getAppVersion(),
     time: new Date().toISOString(),
     runningTaskId: tasks.runningTaskId || null,
     queuedTasks: tasks.queue.length,
   })));
+  router.get('/version', wrap(async () => getAppVersion()));
 
   router.get('/overview', wrap(async () => {
     const subjectRows = subjects.list();
@@ -403,6 +405,16 @@ export function createApiRouter(ctx) {
     return { found: candidates.filter((file) => fs.existsSync(file)), playwrightCache: path.join(process.env.LOCALAPPDATA || '', 'ms-playwright') };
   }));
   router.get('/settings/exportable', wrap(async () => exportableSettings()));
+  // ---------- 软件升级（便携包补丁） ----------
+  router.get('/update/status', wrap(async () => updater.status()));
+  router.post('/update/apply', wrap(async (req) => {
+    const result = await updater.applyPatchBase64(req.body?.dataBase64);
+    if (result.restartRequired && result.packaged) {
+      // 先让响应返回，再让 launcher 自动重启
+      setTimeout(() => { try { process.exit(75); } catch { /* ignore */ } }, 800);
+    }
+    return result;
+  }));
   router.get('/settings/selectors/defaults', wrap(async () => {
     const { DEFAULT_SELECTORS } = await import('./selectors.js');
     return DEFAULT_SELECTORS;
