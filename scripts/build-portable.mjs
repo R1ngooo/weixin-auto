@@ -20,13 +20,14 @@ function run(command, args, options = {}) {
   });
 }
 
-async function copyDir(source, target, { skip = [] } = {}) {
+async function copyDir(source, target, { skip = [], skipFile = () => false } = {}) {
   await fsp.mkdir(target, { recursive: true });
   for (const entry of await fsp.readdir(source, { withFileTypes: true })) {
     if (skip.includes(entry.name)) continue;
+    if (entry.isFile() && skipFile(entry.name)) continue;
     const from = path.join(source, entry.name);
     const to = path.join(target, entry.name);
-    if (entry.isDirectory()) await copyDir(from, to, { skip });
+    if (entry.isDirectory()) await copyDir(from, to, { skip, skipFile });
     else if (entry.isFile()) await fsp.copyFile(from, to);
   }
 }
@@ -96,7 +97,10 @@ async function main() {
   const chromium = findChromiumDir();
   if (!chromium) throw new Error('未找到 Playwright Chromium 缓存，请先运行 npx playwright install chromium');
   console.log(`[build] 复制 Chromium：${chromium.name}`);
-  await copyDir(chromium.dir, path.join(runtimeDir, 'ms-playwright', chromium.name));
+  // 缓存目录可能残留 Playwright 下载的安装包/安装器，不应进入便携包
+  await copyDir(chromium.dir, path.join(runtimeDir, 'ms-playwright', chromium.name), {
+    skipFile: (name) => /\.zip$/i.test(name) || /^setup\.exe$/i.test(name),
+  });
 
   // 写入构建版本
   const versionMeta = {
